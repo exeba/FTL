@@ -915,7 +915,11 @@ static bool add_local_interfaces_to_network_table(sqlite3 *db, time_t now, unsig
 {
 	// Try to access the kernel's Internet protocol address management
 	FILE *ip_pipe = NULL;
+#ifdef __FreeBSD__
+	const char ip_command[] = "ifconfig";
+#else
 	const char ip_command[] = "ip address show";
+#endif
 	if((ip_pipe = popen(ip_command, "r")) == NULL)
 	{
 		logg("WARN: Command \"%s\" failed!", ip_command);
@@ -926,7 +930,11 @@ static bool add_local_interfaces_to_network_table(sqlite3 *db, time_t now, unsig
 	// Buffers
 	char *linebuffer = NULL;
 	size_t linebuffersize = 0u;
+#ifdef __FreeBSD__
+	int rc;
+#else
 	int iface_no, rc;
+#endif
 	bool has_iface = false, has_hwaddr = false;
 	char ipaddr[128], hwaddr[128], iface[128];
 
@@ -937,11 +945,14 @@ static bool add_local_interfaces_to_network_table(sqlite3 *db, time_t now, unsig
 		if(linebuffer == NULL)
 			continue;
 
+#ifdef __FreeBSD__
+		if(sscanf(linebuffer, "%99[^:]: flags", iface) == 1)
+#else
 		if(sscanf(linebuffer, "%i: %99[^:]", &iface_no, iface) == 2)
+#endif
 		{
 			// Obtained an interface, continue to the next line
 			has_iface = true;
-			has_hwaddr = false;
 			iface[sizeof(iface)-1] = '\0';
 			continue;
 		}
@@ -952,7 +963,11 @@ static bool add_local_interfaces_to_network_table(sqlite3 *db, time_t now, unsig
 
 		// Try to read hardware address
 		// We skip lines with "link/none" (virtual, e.g., wireguard interfaces)
+#ifdef __FreeBSD__
+		if(sscanf(linebuffer, "\tether %99s", hwaddr) == 1)
+#else
 		if(sscanf(linebuffer, "    link/ether %99s", hwaddr) == 1)
+#endif
 		{
 			// Obtained an Ethernet hardware address, continue to the next line
 			has_hwaddr = true;
@@ -973,7 +988,11 @@ static bool add_local_interfaces_to_network_table(sqlite3 *db, time_t now, unsig
 
 		// Try to read IPv4 address
 		// We need a special rule here to avoid "inet6 ..." being accepted as IPv4 address
+#ifdef __FreeBSD__
+		if(sscanf(linebuffer, "\tinet%*[ ]%[0-9.] netmask", ipaddr) == 1)
+#else
 		if(sscanf(linebuffer, "    inet%*[ ]%[0-9.] brd", ipaddr) == 1)
+#endif
 		{
 			// Obtained an IPv4 address
 			ipaddr[sizeof(ipaddr)-1] = '\0';
@@ -981,7 +1000,11 @@ static bool add_local_interfaces_to_network_table(sqlite3 *db, time_t now, unsig
 		else
 		{
 			// Try to read IPv6 address
+#ifdef __FreeBSD__
+			if(sscanf(linebuffer, "\tinet6%*[ ]%[0-9a-fA-F:] prefixlen", ipaddr) == 1)
+#else
 			if(sscanf(linebuffer, "    inet6%*[ ]%[0-9a-fA-F:] scope", ipaddr) == 1)
+#endif
 			{
 				// Obtained an IPv6 address
 				ipaddr[sizeof(ipaddr)-1] = '\0';
@@ -1099,7 +1122,11 @@ void parse_neighbor_cache(sqlite3* db)
 {
 	// Try to access the kernel's neighbor cache
 	FILE *arpfp = NULL;
+#ifdef __FreeBSD__
+	const char neigh_command[] = "arp -an";
+#else
 	const char neigh_command[] = "ip neigh show";
+#endif
 	if((arpfp = popen(neigh_command, "r")) == NULL)
 	{
 		logg("WARN: Command \"%s\" failed!", neigh_command);
@@ -1170,8 +1197,13 @@ void parse_neighbor_cache(sqlite3* db)
 		if(killed)
 			break;
 
+#ifdef __FreeBSD__
+		int num = sscanf(linebuffer, "(%99s) at %99s on %99s",
+		                 ip, hwaddr, iface);
+#else
 		int num = sscanf(linebuffer, "%99s dev %99s lladdr %99s",
 		                 ip, iface, hwaddr);
+#endif
 
 		// Ensure strings are null-terminated in case we hit the max.
 		// length limitation
