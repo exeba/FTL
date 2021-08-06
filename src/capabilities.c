@@ -8,6 +8,18 @@
 *  This file is copyright under the latest version of the EUPL.
 *  Please see LICENSE file for your rights under this license. */
 
+
+#ifdef __FreeBSD__
+
+#include "capabilities.h"
+
+bool check_capabilities(void)
+{
+	return true;
+}
+
+#else
+
 // Definition of LINUX_CAPABILITY_VERSION_*
 #define FTLDNS
 #include "dnsmasq/dnsmasq.h"
@@ -115,3 +127,5 @@ bool check_capabilities(void)
 	// Return whether capabilities are all okay
 	return capabilities_okay;
 }
+
+#endif /* __FreeBSD__ */
