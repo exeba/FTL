@@ -28,17 +28,17 @@
 
 /// The name of the shared memory. Use this when connecting to the shared memory.
 #define SHMEM_PATH "/dev/shm"
-#define SHARED_LOCK_NAME "FTL-lock"
-#define SHARED_STRINGS_NAME "FTL-strings"
-#define SHARED_COUNTERS_NAME "FTL-counters"
-#define SHARED_DOMAINS_NAME "FTL-domains"
-#define SHARED_CLIENTS_NAME "FTL-clients"
-#define SHARED_QUERIES_NAME "FTL-queries"
-#define SHARED_UPSTREAMS_NAME "FTL-upstreams"
-#define SHARED_OVERTIME_NAME "FTL-overTime"
-#define SHARED_SETTINGS_NAME "FTL-settings"
-#define SHARED_DNS_CACHE "FTL-dns-cache"
-#define SHARED_PER_CLIENT_REGEX "FTL-per-client-regex"
+#define SHARED_LOCK_NAME "/FTL-lock"
+#define SHARED_STRINGS_NAME "/FTL-strings"
+#define SHARED_COUNTERS_NAME "/FTL-counters"
+#define SHARED_DOMAINS_NAME "/FTL-domains"
+#define SHARED_CLIENTS_NAME "/FTL-clients"
+#define SHARED_QUERIES_NAME "/FTL-queries"
+#define SHARED_UPSTREAMS_NAME "/FTL-upstreams"
+#define SHARED_OVERTIME_NAME "/FTL-overTime"
+#define SHARED_SETTINGS_NAME "/FTL-settings"
+#define SHARED_DNS_CACHE "/FTL-dns-cache"
+#define SHARED_PER_CLIENT_REGEX "/FTL-per-client-regex"
 
 // Limit from which on we warn users about space running out in SHMEM_PATH
 // default: 90%
@@ -294,10 +294,10 @@ const char *getstr(const size_t pos)
 }
 
 /// Create a mutex for shared memory
-static pthread_mutex_t create_mutex(void) {
+static void setup_mutex(pthread_mutex_t *lock) {
 	logg("Creating mutex");
-	pthread_mutexattr_t lock_attr = {};
-	pthread_mutex_t lock = {};
+	pthread_mutexattr_t lock_attr;
+	lock = PTHREAD_MUTEX_INITIALIZER;
 
 	// Initialize the lock attributes
 	pthread_mutexattr_init(&lock_attr);
@@ -309,12 +309,10 @@ static pthread_mutex_t create_mutex(void) {
 	pthread_mutexattr_setrobust(&lock_attr, PTHREAD_MUTEX_ROBUST);
 
 	// Initialize the lock
-	pthread_mutex_init(&lock, &lock_attr);
+	pthread_mutex_init(lock, &lock_attr);
 
 	// Destroy the lock attributes since we're done with it
 	pthread_mutexattr_destroy(&lock_attr);
-
-	return lock;
 }
 
 static void remap_shm(void)
@@ -421,7 +419,7 @@ bool init_shmem(bool create_new)
 	shmLock = (ShmLock*) shm_lock.ptr;
 	if(create_new)
 	{
-		shmLock->lock = create_mutex();
+		setup_mutex(&shmLock->lock);
 		shmLock->waitingForLock = false;
 	}
 
@@ -755,6 +753,37 @@ static bool realloc_shm(SharedMemory *sharedMemory, const size_t size1, const si
 		local_shm_counter++;
 	}
 
+#ifdef __FreeBSD__
+	if(munmap(sharedMemory->ptr, sharedMemory->size) == -1)
+	{
+		logg("FATAL: realloc_shm(): munmap(%p, %zu): Failed to unmap \"%s\": %s",
+		     sharedMemory->ptr, sharedMemory->size, sharedMemory->name, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	const int fd = shm_open(sharedMemory->name, O_RDWR, S_IRUSR | S_IWUSR);
+	if(fd == -1)
+	{
+		logg("FATAL: realloc_shm(): Failed to open shared memory object \"%s\": %s",
+		    sharedMemory->name, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	// Create new shared memory mapping
+	void *new_ptr = mmap(sharedMemory->ptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+	// Check for `mmap` error
+	if(new_ptr == MAP_FAILED)
+	{
+		logg("FATAL: realloc_shm(): Failed to map shared memory object \"%s\" (%i): %s",
+		     sharedMemory->name, fd, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	// Close shared memory object file descriptor as it is no longer
+	// needed after having called mmap()
+	close(fd);
+#else
 	void *new_ptr = mremap(sharedMemory->ptr, sharedMemory->size, size, MREMAP_MAYMOVE);
 	if(new_ptr == MAP_FAILED)
 	{
@@ -763,6 +792,7 @@ static bool realloc_shm(SharedMemory *sharedMemory, const size_t size1, const si
 		     strerror(errno));
 		exit(EXIT_FAILURE);
 	}
+#endif
 
 	// Update how much memory FTL uses
 	// We add the difference between updated and previous size
