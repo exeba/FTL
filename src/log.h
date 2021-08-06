@@ -31,7 +31,7 @@ const char *get_ordinal_suffix(unsigned int number) __attribute__ ((const));
 void _FTL_log(const bool newline, const bool debug, const char* format, ...) __printflike(3, 4);
 void FTL_log_dnsmasq_fatal(const char *format, ...) __printflike(1, 2);
 void log_ctrl(bool vlog, bool vstdout);
-void FTL_log_helper(const unsigned char n, ...);
+void FTL_log_helper(const unsigned int n, ...);
 
 int binbuf_to_escaped_C_literal(const char *src_buf, size_t src_sz, char *dst_str, size_t dst_sz);
 

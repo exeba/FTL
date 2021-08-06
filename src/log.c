@@ -40,7 +40,7 @@ void init_FTL_log(void)
 
 	// Open the log file in append/create mode
 	FILE *logfile = fopen(FTLfiles.log, "a+");
-	if((logfile == NULL)){
+	if(logfile == NULL){
 		syslog(LOG_ERR, "Opening of FTL\'s log file failed!");
 		printf("FATAL: Opening of FTL log (%s) failed!\n",FTLfiles.log);
 		printf("       Make sure it exists and is writeable by user %s\n", username);
@@ -152,7 +152,7 @@ void _FTL_log(const bool newline, const bool debug, const char *format, ...)
 }
 
 // Log helper activity (may be script or lua)
-void FTL_log_helper(const unsigned char n, ...)
+void FTL_log_helper(const unsigned int n, ...)
 {
 	// Only log helper debug messages if enabled
 	if(!(config.debug & DEBUG_HELPER))
