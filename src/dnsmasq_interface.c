@@ -42,6 +42,10 @@
 // Eventqueue routines
 #include "events.h"
 
+#ifdef __FreeBSD__
+#define s6_addr32 __u6_addr.__u6_addr32
+#endif
+
 // Private prototypes
 static void print_flags(const unsigned int flags);
 static void query_set_reply(const unsigned int flags, const union all_addr *addr,

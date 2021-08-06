@@ -11,6 +11,12 @@
 #include "sqlite3.h"
 #include "sqlite3-ext.h"
 
+#ifdef __FreeBSD__
+// AF_INET6
+#include <sys/socket.h>
+// struct in6_addr
+#include <netinet/in.h>
+#endif
 // inet_pton
 #include <arpa/inet.h>
 // sscanf()
