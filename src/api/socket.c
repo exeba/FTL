@@ -314,7 +314,7 @@ static void *telnet_connection_handler_thread(void *socket_desc)
 	// Set thread name
 	char threadname[16];
 	sprintf(threadname, "telnet-%i", sock);
-	prctl(PR_SET_NAME, threadname, 0, 0, 0);
+	set_thread_name(threadname);
 	//Receive from client
 	ssize_t n;
 	while((n = recv(sock,client_message,SOCKETBUFFERLEN-1, 0)))
@@ -365,7 +365,7 @@ static void *socket_connection_handler_thread(void *socket_desc)
 	// Set thread name
 	char threadname[16];
 	sprintf(threadname, "socket-%i", sock);
-	prctl(PR_SET_NAME, threadname, 0, 0, 0);
+	set_thread_name(threadname);
 
 	// Receive from client
 	ssize_t n;
@@ -415,7 +415,7 @@ void *telnet_listening_thread_IPv4(void *args)
 
 	// Set thread name
 	thread_names[TELNETv4] = "telnet-IPv4";
-	prctl(PR_SET_NAME, thread_names[TELNETv4], 0, 0, 0);
+	set_thread_name(thread_names[TELNETv4]);
 
 	// Initialize IPv4 telnet socket
 	ipv4telnet = bind_to_telnet_port_IPv4(&telnetfd4);
@@ -466,7 +466,7 @@ void *telnet_listening_thread_IPv6(void *args)
 
 	// Set thread name
 	thread_names[TELNETv6] = "telnet-IPv6";
-	prctl(PR_SET_NAME, thread_names[TELNETv6], 0, 0, 0);
+	set_thread_name(thread_names[TELNETv6]);
 
 	// Initialize IPv6 telnet socket but only if IPv6 interfaces are available
 	if(!ipv6_available())
@@ -520,7 +520,7 @@ void *socket_listening_thread(void *args)
 
 	// Set thread name
 	thread_names[SOCKET] = "telnet-socket";
-	prctl(PR_SET_NAME, thread_names[SOCKET], 0, 0, 0);
+	set_thread_name(thread_names[SOCKET]);
 
 	// Return early to avoid CPU spinning if Unix socket is not available
 	sock_avail = bind_to_unix_socket(&socketfd);

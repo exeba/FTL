@@ -32,7 +32,10 @@
 #include <netdb.h>
 #include <errno.h>
 #include <pthread.h>
+#ifdef __linux__
+// prctl()
 #include <sys/prctl.h>
+#endif
 //#include <math.h>
 #include <pwd.h>
 // syslog
@@ -139,6 +142,19 @@
 #define fopen(pathname, mode) FTLfopen(pathname, mode, __FILE__,  __FUNCTION__,  __LINE__)
 #define ftlallocate(fd, offset, len) FTLfallocate(fd, offset, len, __FILE__,  __FUNCTION__,  __LINE__)
 #include "syscalls/syscalls.h"
+
+#if defined(__FreeBSD__)
+#include <sys/thr.h>
+static inline void
+set_thread_name(const char *name)
+{
+    long tid;
+    if (thr_self(&tid) == 0)
+        (void)thr_set_name(tid, name);
+}
+#elif defined(__linux__)
+#define set_thread_name(name) prctl(PR_SET_NAME, name, 0, 0, 0)
+#endif /* __FreeBSD__ */
 
 // Preprocessor help functions
 #define str(x) # x

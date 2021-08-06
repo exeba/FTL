@@ -558,7 +558,7 @@ static void *dhcp_discover_iface(void *args)
 	const char *iface = ((struct ifaddrs*)args)->ifa_name;
 
 	// Set interface name as thread name
-	prctl(PR_SET_NAME, iface, 0, 0, 0);
+	set_thread_name(iface);
 
 	// create socket for DHCP communications
 	const int dhcp_socket = create_dhcp_socket(iface);

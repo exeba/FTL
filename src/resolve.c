@@ -588,7 +588,7 @@ void *DNSclient_thread(void *val)
 {
 	// Set thread name
 	thread_names[DNSclient] = "DNS client";
-	prctl(PR_SET_NAME, thread_names[DNSclient], 0, 0, 0);
+	set_thread_name(thread_names[DNSclient]);
 
 	// Initial delay until we first try to resolve anything
 	thread_sleepms(DNSclient, 2000);

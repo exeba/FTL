@@ -37,7 +37,7 @@ void *GC_thread(void *val)
 {
 	// Set thread name
 	thread_names[GC] = "housekeeper";
-	prctl(PR_SET_NAME, thread_names[GC], 0, 0, 0);
+	set_thread_name(thread_names[GC]);
 
 	// Remember when we last ran the actions
 	time_t lastGCrun = time(NULL) - time(NULL)%GCinterval;

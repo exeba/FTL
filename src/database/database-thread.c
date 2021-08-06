@@ -31,7 +31,7 @@ void *DB_thread(void *val)
 {
 	// Set thread name
 	thread_names[DB] = "database";
-	prctl(PR_SET_NAME, thread_names[DB], 0, 0, 0);
+	set_thread_name(thread_names[DB]);
 
 	// Save timestamp as we do not want to store immediately
 	// to the database
