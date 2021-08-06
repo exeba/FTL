@@ -65,7 +65,7 @@ extern const struct opttab_t {
 static int create_dhcp_socket(const char *interface_name)
 {
 	struct sockaddr_in dhcp_socket;
-	struct ifreq interface;
+// FIXME: find SO_BINDTODEVICE alternative	struct ifreq interface;
 	int flag=1;
 
 	// Set up the address we're going to bind to (we will listen on any address).
@@ -100,13 +100,13 @@ static int create_dhcp_socket(const char *interface_name)
 		return -1;
 	}
 
-	// bind socket to interface
-	strncpy(interface.ifr_ifrn.ifrn_name, interface_name, IFNAMSIZ-1);
-	if(setsockopt(sock,SOL_SOCKET, SO_BINDTODEVICE, (char *)&interface, sizeof(interface)) < 0)
-	{
-		logg("Error: Could not bind socket to interface %s (%s)\n       ---> Check your privileges (run with sudo)!\n", interface_name, strerror(errno));
-		return -1;
-	}
+// FIXME: find SO_BINDTODEVICE alternative	// bind socket to interface
+//	strncpy(interface.ifr_name, interface_name, IFNAMSIZ-1);
+//	if(setsockopt(sock,SOL_SOCKET, SO_BINDTODEVICE, (char *)&interface, sizeof(interface)) < 0)
+//	{
+//		logg("Error: Could not bind socket to interface %s (%s)\n       ---> Check your privileges (run with sudo)!\n", interface_name, strerror(errno));
+//		return -1;
+//	}
 
 	// bind the socket
 	if(bind(sock, (struct sockaddr *)&dhcp_socket, sizeof(dhcp_socket)) < 0){
@@ -124,12 +124,12 @@ static int get_hardware_address(const int sock, const char *interface_name, unsi
 	strncpy((char *)&ifr.ifr_name, interface_name, sizeof(ifr.ifr_name)-1);
 
 	// try and grab hardware address of requested interface
-	int ret = 0;
-	if((ret = ioctl(sock, SIOCGIFHWADDR, &ifr)) < 0){
-		logg(" Error: Could not get hardware address of interface '%s' (socket %d, error: %s)", interface_name, sock, strerror(errno));
+//	int ret = 0;
+// FIXME: find SIOCGIFHWADDR alternative	if((ret = ioctl(sock, SIOCGIFHWADDR, &ifr)) < 0){
+			logg(" Error: Could not get hardware address of interface '%s' (socket %d, error: %s)", interface_name, sock, strerror(errno));
 		return false;
-	}
-	memcpy(&mac[0], &ifr.ifr_hwaddr.sa_data, 6);
+//	}
+//	memcpy(&mac[0], &ifr.ifr_ifru.ifru_broadaddr.sa_data, 6);
 #ifdef DEBUG
 	logg_sameline("Hardware address of this interface: ");
 	for (uint8_t i = 0; i < 6; ++i)
@@ -636,8 +636,8 @@ int run_dhcp_discover(void)
 	int tid = 0;
 	while(tmp != NULL && tid < MAXTHREADS)
 	{
-		// Create a thread for interfaces of type AF_PACKET
-		if(tmp->ifa_addr && tmp->ifa_addr->sa_family == AF_PACKET)
+		// FIXME Create a thread for interfaces of type AF_PACKET ->?? PF_PACKET
+		if(tmp->ifa_addr && false /*tmp->ifa_addr->sa_family == PF_PACKET*/)
 		{
 			if(pthread_create(&scanthread[tid], &attr, dhcp_discover_iface, tmp ) != 0)
 			{
