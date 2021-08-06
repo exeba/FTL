@@ -217,7 +217,7 @@ void seom(const int sock)
 		pack_eom(sock);
 }
 
-void __attribute__ ((format (gnu_printf, 2, 3))) ssend(const int sock, const char *format, ...)
+void __printflike(2, 3) ssend(const int sock, const char *format, ...)
 {
 	char *buffer;
 	va_list args;

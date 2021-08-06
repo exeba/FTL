@@ -31,7 +31,7 @@ bool db_set_FTL_property(sqlite3 *db, const enum ftl_table_props ID, const long 
 bool db_set_counter(sqlite3 *db, const enum counters_table_props ID, const long value);
 
 /// Execute a formatted SQL query and get the return code
-int dbquery(sqlite3* db, const char *format, ...) __attribute__ ((format (gnu_printf, 2, 3)));;
+int dbquery(sqlite3* db, const char *format, ...) __printflike(2, 3);
 
 #define dbopen(create) _dbopen(create, __FUNCTION__, __LINE__, __FILE__)
 sqlite3 *_dbopen(bool create, const char *func, const int line, const char *file) __attribute__((warn_unused_result));

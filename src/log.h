@@ -28,8 +28,8 @@ const char *get_ordinal_suffix(unsigned int number) __attribute__ ((const));
 #define logg(format, ...) _FTL_log(true, false, format, ## __VA_ARGS__)
 #define logg_debug(format, ...) _FTL_log(true, true, format, ## __VA_ARGS__)
 #define logg_sameline(format, ...) _FTL_log(false, false, format, ## __VA_ARGS__)
-void _FTL_log(const bool newline, const bool debug, const char* format, ...) __attribute__ ((format (gnu_printf, 3, 4)));
-void FTL_log_dnsmasq_fatal(const char *format, ...) __attribute__ ((format (gnu_printf, 1, 2)));
+void _FTL_log(const bool newline, const bool debug, const char* format, ...) __printflike(3, 4);
+void FTL_log_dnsmasq_fatal(const char *format, ...) __printflike(1, 2);
 void log_ctrl(bool vlog, bool vstdout);
 void FTL_log_helper(const unsigned char n, ...);
 
