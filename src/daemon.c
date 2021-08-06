@@ -12,6 +12,10 @@
 #include "daemon.h"
 #include "config.h"
 #include "log.h"
+#ifdef __FreeBSD__
+// pthread_timedjoin_np
+#include <pthread_np.h>
+#endif
 // sleepms()
 #include "timers.h"
 // close_telnet_socket()
@@ -160,6 +164,18 @@ bool __attribute__ ((const)) is_fork(const pid_t mpid, const pid_t pid)
 	return mpid > -1 && mpid != pid;
 }
 
+#ifdef __FreeBSD__
+pid_t
+FTL_gettid(void)
+{
+	long tid = -1;
+
+	if (thr_self(&tid) == -1)
+		return -1;
+
+	return (pid_t)tid;
+}
+#else
 pid_t FTL_gettid(void)
 {
 #ifdef SYS_gettid
@@ -169,6 +185,7 @@ pid_t FTL_gettid(void)
 	return -1;
 #endif // SYS_gettid
 }
+#endif /* __FreeBSD__ */
 
 static void terminate_threads(void)
 {
