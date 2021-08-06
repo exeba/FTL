@@ -23,6 +23,10 @@
 #include "events.h"
 // sleepms()
 #include "timers.h"
+#if defined(__FreeBSD__)
+// pthread_get_name_np
+#include <pthread_np.h>
+#endif
 
 #define BINARY_NAME "pihole-FTL"
 
@@ -38,7 +42,12 @@ const char *thread_names[THREADS_MAX] = { "" };
 // The name is stored in the buffer as well as returned for convenience
 static char * __attribute__ ((nonnull (1))) getthread_name(char buffer[16])
 {
+#if defined(__FreeBSD__)
+	pthread_get_name_np(pthread_self(), buffer, 16);
+#else
 	prctl(PR_GET_NAME, buffer, 0, 0, 0);
+#endif
+
 	return buffer;
 }
 
