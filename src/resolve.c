@@ -99,15 +99,16 @@ static void print_used_resolvers(const char *message)
 		}
 		else
 		{
-			// Extension name servers (IPv6)
-			j = i - MAXNS;
-			// Some of the entries may not be configured
-			if(_res._u._ext.nsaddrs[j] == NULL ||
-			   _res._u._ext.nsaddrs[j]->sin6_family != AF_INET6)
-				continue;
-			addr = &_res._u._ext.nsaddrs[j]->sin6_addr;
-			port = ntohs(_res._u._ext.nsaddrs[j]->sin6_port);
-			family = _res._u._ext.nsaddrs[j]->sin6_family;
+			continue;
+	//FIXME:		// Extension name servers (IPv6)
+	//		j = i - MAXNS;
+	//		// Some of the entries may not be configured
+	//		if(_res._u._ext.nsaddrs[j] == NULL ||
+	//		   _res._u._ext.nsaddrs[j]->sin6_family != AF_INET6)
+	//			continue;
+	//		addr = &_res._u._ext.nsaddrs[j]->sin6_addr;
+	//		port = ntohs(_res._u._ext.nsaddrs[j]->sin6_port);
+	//		family = _res._u._ext.nsaddrs[j]->sin6_family;
 		}
 
 		// Convert nameserver information to human-readable form
