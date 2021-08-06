@@ -316,7 +316,17 @@ void read_FTLconf(void)
 	}
 	else
 		logg("   DBIMPORT: Not importing history from database");
+#ifdef __FreeBSD__
+	// PIDFILE
+	getpath(fp, "PIDFILE", "/var/run/pihole-FTL.pid", &FTLfiles.pid);
 
+	// PORTFILE
+	getpath(fp, "PORTFILE", "/var/run/pihole-FTL.port", &FTLfiles.port);
+	saveport(config.port);
+
+	// SOCKETFILE
+	getpath(fp, "SOCKETFILE", "/var/run/pihole/FTL.sock", &FTLfiles.socketfile);
+#else
 	// PIDFILE
 	getpath(fp, "PIDFILE", "/run/pihole-FTL.pid", &FTLfiles.pid);
 
@@ -326,6 +336,7 @@ void read_FTLconf(void)
 
 	// SOCKETFILE
 	getpath(fp, "SOCKETFILE", "/run/pihole/FTL.sock", &FTLfiles.socketfile);
+#endif
 
 	// SETUPVARSFILE
 	getpath(fp, "SETUPVARSFILE", "/etc/pihole/setupVars.conf", &FTLfiles.setupVars);
