@@ -619,7 +619,7 @@ int run_dhcp_discover(void)
 	pthread_attr_init(&attr);
 
 	// Create processing/logging lock
-	pthread_mutexattr_t lock_attr = {};
+	pthread_mutexattr_t lock_attr;
 	// Initialize the lock attributes
 	pthread_mutexattr_init(&lock_attr);
 	// Initialize the lock
