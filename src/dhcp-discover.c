@@ -130,7 +130,7 @@ static int get_hardware_address(const int sock, const char *iname, unsigned char
 	// try and grab hardware address of requested interface
 //	int ret = 0;
 // FIXME: find SIOCGIFHWADDR alternative	if((ret = ioctl(sock, SIOCGIFHWADDR, &ifr)) < 0){
-		logg(" Error: Could not get hardware address of interface '%s' (socket %d, error: %s)", interface_name, sock, strerror(errno));
+		logg(" Error: Could not get hardware address of interface '%s' (socket %d, error: %s)", iname, sock, strerror(errno));
 		return false;
 //	}
 //	memcpy(&mac[0], &ifr.ifr_ifru.ifru_broadaddr.sa_data, 6);
