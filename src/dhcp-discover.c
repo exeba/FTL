@@ -206,7 +206,7 @@ static bool send_dhcp_discover(const int sock, const uint32_t xid, const char *i
 	discover_packet.options[6] = 1;      // DHCP message type code for DHCPDISCOVER
 
 	// Place end option at the end of the options
-	discover_packet.options[7] = 255;
+	discover_packet.options[7] = -1;     // 255
 
 	// send the DHCPDISCOVER packet to the specified address
 	struct sockaddr_in target;
