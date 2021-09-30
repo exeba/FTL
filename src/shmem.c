@@ -306,7 +306,7 @@ const char *getstr(const size_t pos)
 static pthread_mutex_t create_mutex(void) {
 	logg("Creating mutex");
 	pthread_mutexattr_t lock_attr;
-	lock = PTHREAD_MUTEX_INITIALIZER;
+	pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 	// Initialize the lock attributes
 	pthread_mutexattr_init(&lock_attr);
