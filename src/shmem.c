@@ -303,10 +303,10 @@ const char *getstr(const size_t pos)
 }
 
 /// Create a mutex for shared memory
-static pthread_mutex_t create_mutex(void) {
+static void init_mutex(pthread_mutex_t *lock) {
 	logg("Creating mutex");
 	pthread_mutexattr_t lock_attr;
-	pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+	*lock = PTHREAD_MUTEX_INITIALIZER;
 
 	// Initialize the lock attributes
 	pthread_mutexattr_init(&lock_attr);
@@ -318,12 +318,10 @@ static pthread_mutex_t create_mutex(void) {
 	pthread_mutexattr_setrobust(&lock_attr, PTHREAD_MUTEX_ROBUST);
 
 	// Initialize the lock
-	pthread_mutex_init(&lock, &lock_attr);
+	pthread_mutex_init(lock, &lock_attr);
 
 	// Destroy the lock attributes since we're done with it
 	pthread_mutexattr_destroy(&lock_attr);
-
-	return lock;
 }
 
 static void remap_shm(void)
@@ -460,8 +458,8 @@ bool init_shmem(bool create_new)
 	shmLock = (ShmLock*) shm_lock.ptr;
 	if(create_new)
 	{
-		shmLock->lock.outer = create_mutex();
-		shmLock->lock.inner = create_mutex();
+		init_mutex(&shmLock->lock.outer);
+		init_mutex(&shmLock->lock.inner);
 	}
 
 	/****************************** shared counters struct ******************************/
