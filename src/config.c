@@ -25,7 +25,11 @@
 ConfigStruct config;
 FTLFileNamesStruct FTLfiles = {
 	// Default path for config file (regular installations)
+#ifdef __FreeBSD__
+	"/usr/local/etc/pihole/pihole-FTL.conf",
+#else
 	"/etc/pihole/pihole-FTL.conf",
+#endif
 	// Alternative path for config file (snap installations)
 	"/var/snap/pihole/common/etc/pihole/pihole-FTL.conf",
 	NULL,
@@ -332,6 +336,15 @@ void read_FTLconf(void)
 
 	// SOCKETFILE
 	getpath(fp, "SOCKETFILE", "/var/run/pihole/FTL.sock", &FTLfiles.socketfile);
+
+	// SETUPVARSFILE
+	getpath(fp, "SETUPVARSFILE", "/usr/local/etc/pihole/setupVars.conf", &FTLfiles.setupVars);
+
+	// MACVENDORDB
+	getpath(fp, "MACVENDORDB", "/usr/local/etc/pihole/macvendor.db", &FTLfiles.macvendor_db);
+
+	// GRAVITYDB
+	getpath(fp, "GRAVITYDB", "/usr/local/etc/pihole/gravity.db", &FTLfiles.gravity_db);
 #else
 	// PIDFILE
 	getpath(fp, "PIDFILE", "/run/pihole-FTL.pid", &FTLfiles.pid);
@@ -342,7 +355,6 @@ void read_FTLconf(void)
 
 	// SOCKETFILE
 	getpath(fp, "SOCKETFILE", "/run/pihole/FTL.sock", &FTLfiles.socketfile);
-#endif
 
 	// SETUPVARSFILE
 	getpath(fp, "SETUPVARSFILE", "/etc/pihole/setupVars.conf", &FTLfiles.setupVars);
@@ -352,6 +364,7 @@ void read_FTLconf(void)
 
 	// GRAVITYDB
 	getpath(fp, "GRAVITYDB", "/etc/pihole/gravity.db", &FTLfiles.gravity_db);
+#endif
 
 	// PARSE_ARP_CACHE
 	// defaults to: true
