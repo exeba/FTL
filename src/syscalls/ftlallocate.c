@@ -16,24 +16,28 @@
 // off_t is automatically set as off64_t when this is a 64bit system
 int FTLfallocate(const int fd, const off_t offset, const off_t len, const char *file, const char *func, const int line)
 {
-	int ret = 0;
+	if (offset != 0)
+	{
+		logg("WARN: Cannot set offset on ftruncate() in %s() (%s:%i)",
+		     func, file, line);
+		errno = EINVAL;
+
+		return errno;
+	}
+
 	do
 	{
-		// posix_fallocate directly returns errno and doesn't set the
-		// actual errno system global
-		ret = posix_fallocate(fd, offset, len);
+		ftruncate(fd, len);
 	}
-	// Try again if the last posix_fallocate() call failed due to an
+	// Try again if the last ftruncate() call failed due to an
 	// interruption by an incoming signal
-	while(ret == EINTR);
+	while(errno == EINTR);
 
 	// Final error checking (may have faild for some other reason then an
 	// EINTR = interrupted system call)
-	if(ret > 0)
+	if(errno > 0)
 		logg("WARN: Could not fallocate() in %s() (%s:%i): %s",
-		     func, file, line, strerror(ret));
+		     func, file, line, strerror(errno));
 
-	// Set errno ourselves as posix_fallocate doesn't do it
-	errno = ret;
-	return ret;
+	return errno;
 }
