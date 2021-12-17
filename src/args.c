@@ -215,6 +215,13 @@ void parse_args(int argc, char* argv[])
 			ok = true;
 		}
 
+		if(strcmp(argv[i], "--shm-cleanup") == 0)
+		{
+			init_shmem(false);
+			destroy_shmem();
+			exit(EXIT_SUCCESS);
+		}
+
 		if(strcmp(argv[i], "-v") == 0 ||
 		   strcmp(argv[i], "version") == 0 ||
 		   strcmp(argv[i], "--version") == 0)
@@ -315,6 +322,7 @@ void parse_args(int argc, char* argv[])
 			printf("\t                    don't go into daemon mode\n");
 			printf("\t    test            Don't start pihole-FTL but\n");
 			printf("\t                    instead quit immediately\n");
+			printf("\t--shm-cleanup       Close all shm handles and exit\n");
 			printf("\t-v, version         Return FTL version\n");
 			printf("\t-vv                 Return more version information\n");
 			printf("\t-t, tag             Return git tag\n");
