@@ -208,7 +208,11 @@ void read_FTLconf(void)
 	if(!(buffer != NULL && sscanf(buffer, "%127ms", &FTLfiles.FTL_db)))
 	{
 		// Use standard path if no custom path was obtained from the config file
+#ifdef __FreeBSD__
+		FTLfiles.FTL_db = strdup("/usr/local/etc/pihole/pihole-FTL.db");
+#else
 		FTLfiles.FTL_db = strdup("/etc/pihole/pihole-FTL.db");
+#endif
 	}
 
 	if(FTLfiles.FTL_db != NULL && strlen(FTLfiles.FTL_db) > 0)
@@ -217,7 +221,11 @@ void read_FTLconf(void)
 	{
 		// Use standard path if path was set to zero but override
 		// MAXDBDAYS=0 to ensure no queries are stored in the database
+#ifdef __FreeBSD__
+		FTLfiles.FTL_db = strdup("/usr/local/etc/pihole/pihole-FTL.db");
+#else
 		FTLfiles.FTL_db = strdup("/etc/pihole/pihole-FTL.db");
+#endif
 		config.maxDBdays = 0;
 		logg("   DBFILE: Using %s (not storing queries)", FTLfiles.FTL_db);
 	}
