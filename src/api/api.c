@@ -40,10 +40,15 @@
 #include "../database/aliasclients.h"
 // get_edestr()
 #include "api_helper.h"
+// RTF_UP, RTF_GATEWAY
+#include <linux/route.h>
+
+// defined in src/dnsmasq/cache.c
+extern char *querystr(char *desc, unsigned short type);
 
 #define min(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
 
-/* qsort comparision function (count field), sort ASC */
+/* qsort comparison function (count field), sort ASC */
 static int __attribute__((pure)) cmpasc(const void *a, const void *b)
 {
 	const int *elem1 = (int*)a;
@@ -118,9 +123,13 @@ void getStats(const int *sock)
 		ssend(*sock, "dns_queries_all_types %i\n", sumalltypes);
 
 		// Send individual reply type counters
-		ssend(*sock, "reply_NODATA %i\nreply_NXDOMAIN %i\nreply_CNAME %i\nreply_IP %i\n",
-		      counters->reply[REPLY_NODATA], counters->reply[REPLY_NXDOMAIN],
-		      counters->reply[REPLY_CNAME], counters->reply[REPLY_IP]);
+		int sumallreplies = 0;
+		for(enum reply_type reply = REPLY_UNKNOWN; reply < QUERY_REPLY_MAX; reply++)
+		{
+			ssend(*sock, "reply_%s %i\n", get_query_reply_str(reply), counters->reply[reply]);
+			sumallreplies += counters->reply[reply];
+		}
+		ssend(*sock, "dns_queries_all_replies %i\n", sumallreplies);
 		ssend(*sock, "privacy_level %i\n", config.privacylevel);
 	}
 	else
@@ -145,39 +154,9 @@ void getStats(const int *sock)
 
 void getOverTime(const int *sock)
 {
-	int from = 0, until = OVERTIME_SLOTS;
-	bool found = false;
-	time_t mintime = overTime[0].timestamp;
-
-	// Start with the first non-empty overTime slot
-	for(int slot = 0; slot < OVERTIME_SLOTS; slot++)
-	{
-		if((overTime[slot].total > 0 || overTime[slot].blocked > 0) &&
-		   overTime[slot].timestamp >= mintime)
-		{
-			from = slot;
-			found = true;
-			break;
-		}
-	}
-
-	// End with last non-empty overTime slot
-	for(int slot = 0; slot < OVERTIME_SLOTS; slot++)
-	{
-		if(overTime[slot].timestamp >= time(NULL))
-		{
-			until = slot;
-			break;
-		}
-	}
-
-	// Check if there is any data to be sent
-	if(!found)
-		return;
-
 	if(istelnet[*sock])
 	{
-		for(int slot = from; slot < until; slot++)
+		for(int slot = 0; slot < OVERTIME_SLOTS; slot++)
 		{
 			ssend(*sock,"%lli %i %i\n",
 			      (long long)overTime[slot].timestamp,
@@ -191,15 +170,15 @@ void getOverTime(const int *sock)
 		// and map16 can hold up to (2^16)-1 = 65535 pairs
 
 		// Send domains over time
-		pack_map16_start(*sock, (uint16_t) (until - from));
-		for(int slot = from; slot < until; slot++) {
+		pack_map16_start(*sock, (uint16_t) OVERTIME_SLOTS);
+		for(int slot = 0; slot < OVERTIME_SLOTS; slot++) {
 			pack_int32(*sock, (int32_t)overTime[slot].timestamp);
 			pack_int32(*sock, overTime[slot].total);
 		}
 
 		// Send ads over time
-		pack_map16_start(*sock, (uint16_t) (until - from));
-		for(int slot = from; slot < until; slot++) {
+		pack_map16_start(*sock, (uint16_t) OVERTIME_SLOTS);
+		for(int slot = 0; slot < OVERTIME_SLOTS; slot++) {
 			pack_int32(*sock, (int32_t)overTime[slot].timestamp);
 			pack_int32(*sock, overTime[slot].blocked);
 		}
@@ -495,7 +474,7 @@ void getTopClients(const char *client_message, const int *sock)
 void getUpstreamDestinations(const char *client_message, const int *sock)
 {
 	bool sort = true;
-	int temparray[counters->upstreams][2], totalqueries = 0, totalcount = 0;
+	int temparray[counters->upstreams][2], sumforwarded = 0;
 
 	if(command(client_message, "unsorted"))
 		sort = false;
@@ -513,7 +492,7 @@ void getUpstreamDestinations(const char *client_message, const int *sock)
 		for(unsigned i = 0; i < (sizeof(upstream->overTime)/sizeof(*upstream->overTime)); i++)
 			count += upstream->overTime[i];
 		temparray[upstreamID][1] = count;
-		totalcount += count;
+		sumforwarded += count;
 	}
 
 	if(sort)
@@ -522,34 +501,50 @@ void getUpstreamDestinations(const char *client_message, const int *sock)
 		qsort(temparray, counters->upstreams, sizeof(int[2]), cmpdesc);
 	}
 
-	totalqueries = totalcount + cached_queries() + blocked_queries();
+	const int cached = cached_queries();
+	const int blocked = blocked_queries();
+	const int others = counters->queries - counters->status[QUERY_FORWARDED] - cached - blocked;
+	// The total number of DNS packets can be different than the total
+	// number of queries as FTL is periodically sending queries to multiple
+	// DNS upstream servers to probe which one is the fastest
+	const int totalqueries = sumforwarded + blocked + cached + others;
 
 	// Loop over available forward destinations
-	for(int i = -2; i < min(counters->upstreams, 8); i++)
+	for(int i = -3; i < min(counters->upstreams, 8); i++)
 	{
 		float percentage = 0.0f;
 		const char *ip, *name;
 		in_port_t upstream_port = 0;
 
-		if(i == -2)
+		if(i == -3)
 		{
 			// Blocked queries (local lists)
-			ip = "blocklist";
+			ip = "blocked";
 			name = ip;
 
 			if(totalqueries > 0)
-				// Whats the percentage of locked queries on the total amount of queries?
-				percentage = 1e2f * blocked_queries() / totalqueries;
+				// What's the percentage of blocked queries on the total amount of queries?
+				percentage = 1e2f * blocked / totalqueries;
+		}
+		else if(i == -2)
+		{
+			// Local cache
+			ip = "cached";
+			name = ip;
+
+			if(totalqueries > 0)
+				// What's the percentage of cached queries on the total amount of queries?
+				percentage = 1e2f * cached / totalqueries;
 		}
 		else if(i == -1)
 		{
-			// Local cache
-			ip = "cache";
+			// Others
+			ip = "other";
 			name = ip;
 
 			if(totalqueries > 0)
-				// Whats the percentage of cached queries on the total amount of queries?
-				percentage = 1e2f * cached_queries() / totalqueries;
+				// What's the percentage of cached queries on the total amount of queries?
+				percentage = 1e2f * others / totalqueries;
 		}
 		else
 		{
@@ -576,7 +571,7 @@ void getUpstreamDestinations(const char *client_message, const int *sock)
 		}
 
 		// Send data:
-		// - always if i < 0 (special upstreams: blocklist and cache)
+		// - always if i < 0 (special upstreams: blocked and cached)
 		// - only if percentage > 0.0 for all others (i > 0)
 		if(percentage > 0.0f || i < 0)
 		{
@@ -711,14 +706,18 @@ void getAllQueries(const char *client_message, const int *sock)
 	if(command(client_message, ">getallqueries-forward")) {
 		// Get forward destination name we want to see only (limit length to 255 chars)
 		forwarddest = calloc(256, sizeof(char));
-		if(forwarddest == NULL) return;
+		if(forwarddest == NULL)
+			return;
+
 		sscanf(client_message, ">getallqueries-forward %255s", forwarddest);
 		filterforwarddest = true;
 
-		if(strcmp(forwarddest, "cache") == 0)
-			forwarddestid = -1;
-		else if(strcmp(forwarddest, "blocklist") == 0)
+		if(strcmp(forwarddest, "blocked") == 0)
+			forwarddestid = -3;
+		else if(strcmp(forwarddest, "cached") == 0)
 			forwarddestid = -2;
+		else if(strcmp(forwarddest, "other") == 0)
+			forwarddestid = -1;
 		else
 		{
 			// Extract address/name and port
@@ -763,7 +762,12 @@ void getAllQueries(const char *client_message, const int *sock)
 	if(command(client_message, ">getallqueries-domain")) {
 		// Get domain name we want to see only (limit length to 255 chars)
 		domainname = calloc(256, sizeof(char));
-		if(domainname == NULL) return;
+		if(domainname == NULL)
+		{
+			if(forwarddest) free(forwarddest);
+			return;
+		}
+
 		sscanf(client_message, ">getallqueries-domain %255s", domainname);
 		filterdomainname = true;
 		// Iterate through all known domains
@@ -786,6 +790,7 @@ void getAllQueries(const char *client_message, const int *sock)
 			// Requested domain has not been found, we directly
 			// exit here as there is no data to be returned
 			free(domainname);
+			if(forwarddest) free(forwarddest);
 			return;
 		}
 	}
@@ -794,7 +799,13 @@ void getAllQueries(const char *client_message, const int *sock)
 	if(command(client_message, ">getallqueries-client")) {
 		// Get client name we want to see only (limit length to 255 chars)
 		clientname = calloc(256, sizeof(char));
-		if(clientname == NULL) return;
+		if(clientname == NULL)
+		{
+			if(forwarddest) free(forwarddest);
+			if(domainname) free(domainname);
+			return;
+		}
+
 		if(command(client_message, ">getallqueries-client-blocked"))
 		{
 			showpermitted = false;
@@ -834,6 +845,8 @@ void getAllQueries(const char *client_message, const int *sock)
 			// Requested client has not been found, we directly
 			// exit here as there is no data to be returned
 			free(clientname);
+			if(forwarddest) free(forwarddest);
+			if(domainname) free(domainname);
 			return;
 		}
 
@@ -881,10 +894,17 @@ void getAllQueries(const char *client_message, const int *sock)
 		char othertype[12] = { 0 }; // Maximum is "TYPE65535" = 10 bytes
 		if(query->type == TYPE_OTHER)
 		{
-			// Format custom type into buffer
-			sprintf(othertype, "TYPE%u", query->qtype);
-			// Replace qtype pointer
-			qtype = othertype;
+			// Check the dnsmasq RR types table for a matching record
+			qtype = querystr((char*)"", query->qtype);
+
+			// If not known (querystr() returned "type=1234"), we replace this
+			if(!qtype || strstr(qtype, "type=") != NULL)
+			{
+				// Format custom type into buffer
+				sprintf(othertype, "TYPE%u", query->qtype);
+				// Replace qtype pointer
+				qtype = othertype;
+			}
 		}
 
 		// Hide UNKNOWN queries when not requesting both query status types
@@ -950,10 +970,13 @@ void getAllQueries(const char *client_message, const int *sock)
 		if(filterforwarddest)
 		{
 			// Skip if not from the virtual blocking "upstream" server
-			if(forwarddestid == -2 && !query->flags.blocked)
+			if(forwarddestid == -3 && !query->flags.blocked)
 				continue;
 			// Does the user want to see queries answered from local cache?
-			else if(forwarddestid == -1 && query->status != QUERY_CACHE)
+			else if(forwarddestid == -2 && query->status != QUERY_CACHE)
+				continue;
+			// Does the user want to see queries from the "other" category
+			else if(forwarddestid == -1 && query->status != QUERY_IN_PROGRESS)
 				continue;
 			// Does the user want to see queries answered by an upstream server?
 			else if(forwarddestid >= 0 && forwarddestid != query->upstreamID)
@@ -976,10 +999,7 @@ void getAllQueries(const char *client_message, const int *sock)
 		else
 			clientIPName = getClientIPString(query);
 
-		unsigned long delay = query->response;
-		// Check if received (delay should be smaller than 30min)
-		if(delay > 1.8e7)
-			delay = 0;
+		unsigned long delay = query->flags.response_calculated ? query->response : 0UL;
 
 		// Get domain blocked during deep CNAME inspection, if applicable
 		const char *CNAME_domain = "N/A";
@@ -1018,6 +1038,21 @@ void getAllQueries(const char *client_message, const int *sock)
 			}
 		}
 
+		// Get reply type
+		// If this is a partially cached CNAME (parts needed to be
+		// forwarded) but we never receive replies, we have to set the
+		// reply back to unknown instead of handing out "CNAME"
+		// See https://discourse.pi-hole.net/t/garbage-response-times-for-many-almost-half-at-times-cname-answers/50291/17
+		enum reply_type reply = query->flags.response_calculated ? query->reply : REPLY_UNKNOWN;
+
+		// Overwrite reply and reply time if they don't make sense for this query
+		// See same Discourse discussion as immediately above
+		if(query->status == QUERY_RETRIED || query->status == QUERY_IN_PROGRESS)
+		{
+			reply = REPLY_UNKNOWN;
+			delay = 0UL;
+		}
+
 		if(istelnet[*sock])
 		{
 			ssend(*sock,"%lli %s %s %s %i %i %i %lu %s %i %s#%u \"%s\"",
@@ -1027,7 +1062,7 @@ void getAllQueries(const char *client_message, const int *sock)
 				clientIPName,
 				query->status,
 				query->dnssec,
-				query->reply,
+				reply,
 				delay,
 				CNAME_domain,
 				regex_idx,
@@ -1045,11 +1080,11 @@ void getAllQueries(const char *client_message, const int *sock)
 
 			// Use a fixstr because the length of qtype is always 4 (max is 31 for fixstr)
 			if(!pack_fixstr(*sock, qtype))
-				return;
+				break;
 
 			// Use str32 for domain and client because we have no idea how long they will be (max is 4294967295 for str32)
 			if(!pack_str32(*sock, domain) || !pack_str32(*sock, clientIPName))
-				return;
+				break;
 
 			pack_uint8(*sock, query->status);
 			pack_uint8(*sock, query->dnssec);
@@ -1102,7 +1137,7 @@ void getRecentBlocked(const char *client_message, const int *sock)
 			else if(!pack_str32(*sock, domain))
 				return;
 
-			// Only count when sent succesfully
+			// Only count when sent successfully
 			found++;
 		}
 
@@ -1174,14 +1209,13 @@ void getDBstats(const int *sock)
 	// Get file details
 	unsigned long long int filesize = get_FTL_db_filesize();
 
-	char *prefix = calloc(2, sizeof(char));
-	if(prefix == NULL) return;
-	double formated = 0.0;
-	format_memory_size(prefix, filesize, &formated);
+	char prefix[2] = { 0 };
+	double formatted = 0.0;
+	format_memory_size(prefix, filesize, &formatted);
 
 	if(istelnet[*sock])
 		ssend(*sock, "queries in database: %i\ndatabase filesize: %.2f %sB\nSQLite version: %s\n",
-		             get_number_of_queries_in_DB(NULL), formated, prefix, get_sqlite3_version());
+		             get_number_of_queries_in_DB(NULL), formatted, prefix, get_sqlite3_version());
 	else {
 		pack_int32(*sock, get_number_of_queries_in_DB(NULL));
 		pack_int64(*sock, filesize);
@@ -1193,35 +1227,10 @@ void getDBstats(const int *sock)
 
 void getClientsOverTime(const int *sock)
 {
-	int sendit = -1, until = OVERTIME_SLOTS;
-
 	// Exit before processing any data if requested via config setting
 	get_privacy_level(NULL);
 	if(config.privacylevel >= PRIVACY_HIDE_DOMAINS_CLIENTS)
 		return;
-
-	// Find minimum ID to send
-	for(int slot = 0; slot < OVERTIME_SLOTS; slot++)
-	{
-		if((overTime[slot].total > 0 || overTime[slot].blocked > 0) &&
-		   overTime[slot].timestamp >= overTime[0].timestamp)
-		{
-			sendit = slot;
-			break;
-		}
-	}
-	if(sendit < 0)
-		return;
-
-	// Find minimum ID to send
-	for(int slot = 0; slot < OVERTIME_SLOTS; slot++)
-	{
-		if(overTime[slot].timestamp >= time(NULL))
-		{
-			until = slot;
-			break;
-		}
-	}
 
 	// Get clients which the user doesn't want to see
 	char * excludeclients = read_setupVarsconf("API_EXCLUDE_CLIENTS");
@@ -1252,7 +1261,7 @@ void getClientsOverTime(const int *sock)
 	}
 
 	// Main return loop
-	for(int slot = sendit; slot < until; slot++)
+	for(int slot = 0; slot < OVERTIME_SLOTS; slot++)
 	{
 		if(istelnet[*sock])
 			ssend(*sock, "%lli", (long long)overTime[slot].timestamp);
@@ -1435,4 +1444,330 @@ void delete_lease(const char *client_message, const int *sock)
 
 	if(config.debug & DEBUG_API)
 		logg("...done");
+}
+
+void getDNSport(const int *sock)
+{
+	// Return DNS port used by FTL
+	ssend(*sock, "%d\n", config.dns_port);
+}
+
+void getMAXLOGAGE(const int *sock)
+{
+	// Return maxlogage used by FTL
+	ssend(*sock, "%d\n", config.maxlogage);
+}
+
+static bool getDefaultInterface(char iface[IF_NAMESIZE], in_addr_t *gw)
+{
+	// Get IPv4 default route gateway and associated interface
+	long dest_r = 0, gw_r = 0;
+	int flags = 0, metric = 0, minmetric = __INT_MAX__;
+	char iface_r[IF_NAMESIZE] = { 0 };
+	char buf[1024] = { 0 };
+
+	FILE *file;
+	if((file = fopen("/proc/net/route", "r")))
+	{
+		// Parse /proc/net/route - the kernel's IPv4 routing table
+		while(fgets(buf, sizeof(buf), file))
+		{
+			if(sscanf(buf, "%s %lx %lx %x %*i %*i %i", iface_r, &dest_r, &gw_r, &flags, &metric) != 5)
+				continue;
+
+			// Only anaylze routes which are UP and whose
+			// destinations are a gateway
+			if(!(flags & RTF_UP) || !(flags & RTF_GATEWAY))
+				continue;
+
+			// Only analyze "catch all" routes (destination 0.0.0.0)
+			if(dest_r != 0)
+				continue;
+
+			// Store default gateway, overwrite if we find a route with
+			// a lower metric
+			if(metric < minmetric)
+			{
+				minmetric = metric;
+				*gw = gw_r;
+				strcpy(iface, iface_r);
+
+				if(config.debug & DEBUG_API)
+					logg("Reading interfaces: flags: %i, addr: %s, iface: %s, metric: %i, minmetric: %i",
+					     flags, inet_ntoa(*(struct in_addr *) gw), iface, metric, minmetric);
+			}
+		}
+		fclose(file);
+	}
+	else
+		logg("Cannot read /proc/net/route: %s", strerror(errno));
+
+	// Return success based on having found the default gateway's address
+	return gw != 0;
+}
+
+void getGateway(const int *sock)
+{
+	in_addr_t gw = 0;
+	char iface[IF_NAMESIZE] = { 0 };
+
+	getDefaultInterface(iface, &gw);
+	ssend(*sock, "%s %s\n", inet_ntoa(*(struct in_addr *) &gw), iface);
+}
+
+struct if_info {
+	bool carrier;
+	bool default_iface;
+	char *name;
+	struct {
+		char *v4;
+		char *v6;
+	} ip;
+	int speed;
+	ssize_t rx_bytes;
+	ssize_t tx_bytes;
+	sa_family_t family;
+	struct if_info *next;
+};
+
+#include <dirent.h>
+
+static bool listInterfaces(struct if_info **head, char default_iface[IF_NAMESIZE])
+{
+	// Loop over interfaces and extract information
+	DIR *dfd;
+	FILE *f;
+	struct dirent *dp;
+	struct if_info *tail = NULL;
+	size_t tx_sum = 0, rx_sum = 0;
+	char fname[64 + IF_NAMESIZE] = { 0 };
+	char readbuffer[1024] = { 0 };
+
+	// Open /sys/class/net directory
+	if ((dfd = opendir("/sys/class/net")) == NULL)
+	{
+		logg("API: Cannot access /sys/class/net");
+		return false;
+	}
+
+	// Get IP addresses of all interfaces on this machine
+	struct ifaddrs *ifap = NULL;
+	if(getifaddrs(&ifap) == -1)
+		logg("API error: Cannot get interface addresses: %s", strerror(errno));
+
+	// Walk /sys/class/net directory
+	while ((dp = readdir(dfd)) != NULL)
+	{
+		// Skip "." and ".."
+		if(!dp->d_name || strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
+			continue;
+
+		// Create new interface record
+		struct if_info *new = calloc(1, sizeof(struct if_info));
+		new->name = strdup(dp->d_name);
+
+		new->default_iface = strcmp(new->name, default_iface) == 0;
+
+		// Extract carrier status
+		snprintf(fname, sizeof(fname)-1, "/sys/class/net/%s/carrier", new->name);
+		if((f = fopen(fname, "r")) != NULL)
+		{
+			if(fgets(readbuffer, sizeof(readbuffer)-1, f) != NULL)
+				new->carrier = readbuffer[0] == '1';
+			fclose(f);
+		}
+		else
+			logg("Cannot read %s: %s", fname, strerror(errno));
+
+		// Extract link speed (may not be possible, e.g., for WiFi devices with dynamic link speeds)
+		snprintf(fname, sizeof(fname)-1, "/sys/class/net/%s/speed", new->name);
+		if((f = fopen(fname, "r")) != NULL)
+		{
+			if(fscanf(f, "%i", &(new->speed)) != 1)
+				new->speed = -1;
+			fclose(f);
+		}
+		else
+			logg("Cannot read %s: %s", fname, strerror(errno));
+
+		// Get total transmitted bytes
+		snprintf(fname, sizeof(fname)-1, "/sys/class/net/%s/statistics/tx_bytes", new->name);
+		if((f = fopen(fname, "r")) != NULL)
+		{
+			if(fscanf(f, "%zi", &(new->tx_bytes)) != 1)
+				new->tx_bytes = -1;
+			fclose(f);
+		}
+		else
+			logg("Cannot read %s: %s", fname, strerror(errno));
+
+		// Get total transmitted bytes
+		snprintf(fname, sizeof(fname)-1, "/sys/class/net/%s/statistics/rx_bytes", new->name);
+		if((f = fopen(fname, "r")) != NULL)
+		{
+			if(fscanf(f, "%zi", &(new->rx_bytes)) != 1)
+				new->rx_bytes = -1;
+			fclose(f);
+		}
+		else
+			logg("Cannot read %s: %s", fname, strerror(errno));
+
+		// Get IP address(es) of this interface
+		if(ifap)
+		{
+			// Walk through linked list of interface addresses
+
+			for(struct ifaddrs *ifa = ifap; ifa != NULL; ifa = ifa->ifa_next)
+			{
+				// Skip interfaces without an address and those
+				// not matching the current interface
+				if(ifa->ifa_addr == NULL || strcmp(ifa->ifa_name, new->name) != 0)
+					continue;
+
+				// If we reach this point, we found the correct interface
+				new->family = ifa->ifa_addr->sa_family;
+				char host[NI_MAXHOST] = { 0 };
+				if(new->family == AF_INET || new->family == AF_INET6)
+				{
+					// Get IP address
+					const int s = getnameinfo(ifa->ifa_addr,
+					                          (new->family == AF_INET) ?
+					                               sizeof(struct sockaddr_in) :
+					                               sizeof(struct sockaddr_in6),
+					                          host, NI_MAXHOST,
+					                          NULL, 0, NI_NUMERICHOST);
+					if (s != 0)
+					{
+						logg("API warning: getnameinfo() failed: %s\n", gai_strerror(s));
+						continue;
+					}
+
+					if(new->family == AF_INET)
+					{
+						// IPv4 address
+						if(!new->ip.v4)
+						{
+							// First or only IPv4 address of this interface
+							new->ip.v4 = strdup(host);
+						}
+						else
+						{
+							// Create comma-separated list
+							char *new_v4 = calloc(strlen(new->ip.v4) + strlen(host) + 2, sizeof(char));
+							sprintf(new_v4, "%s,%s", new->ip.v4, host);
+							free(new->ip.v4);
+							new->ip.v4 = new_v4;
+						}
+					}
+					else if(new->family == AF_INET6)
+					{
+						// IPv6 address
+						if(!new->ip.v6)
+						{
+							// First or only IPv6 address of this interface
+							new->ip.v6 = strdup(host);
+						}
+						else
+						{
+							// Create comma-separated list
+							char *new_v6 = calloc(strlen(new->ip.v6) + strlen(host) + 2, sizeof(char));
+							sprintf(new_v6, "%s,%s", new->ip.v6, host);
+							free(new->ip.v6);
+							new->ip.v6 = new_v6;
+						}
+					}
+				}
+			}
+		}
+
+		// Add to end of the linked list
+		if(!*head)
+			*head = new;
+		if(tail)
+			tail->next = new;
+		tail = new;
+
+		tx_sum += new->tx_bytes;
+		rx_sum += new->rx_bytes;
+	}
+
+	freeifaddrs(ifap);
+
+	// Create sum entry only if there is more than one interface
+	if(head == NULL)
+		return true;
+
+	struct if_info *new = calloc(1, sizeof(struct if_info));
+	new->name = strdup("sum");
+	new->carrier = true;
+	new->speed = 0;
+	new->tx_bytes = tx_sum;
+	new->rx_bytes = rx_sum;
+	if(tail)
+		tail->next = new;
+	tail = new;
+
+	return true;
+}
+
+static void send_iface(const int *sock, struct if_info *iface)
+{
+	double tx = 0.0, rx = 0.0;
+	char txp[2] = { 0 }, rxp[2] = { 0 };
+	format_memory_size(txp, iface->tx_bytes, &tx);
+	format_memory_size(rxp, iface->rx_bytes, &rx);
+	ssend(*sock, "%s %s %i %.1f%sB %.1f%sB %s %s\n",
+	      iface->name,
+	      iface->carrier ? "UP" : "DOWN",
+	      iface->speed,
+	      tx, txp, rx, rxp,
+	      iface->carrier && iface->ip.v4 ? iface->ip.v4 : "-",
+	      iface->carrier && iface->ip.v6 ? iface->ip.v6 : "-");
+}
+
+void getInterfaces(const int *sock)
+{
+	// Get interface with default route
+	in_addr_t gw = 0;
+	char default_iface[IF_NAMESIZE] = { 0 };
+	getDefaultInterface(default_iface, &gw);
+
+	// Enumerate and list interfaces
+	struct if_info *ifinfo = NULL;
+	if(!listInterfaces(&ifinfo, default_iface))
+	{
+		ssend(*sock, "ERROR");
+		return;
+	}
+
+	// Loop over collected interface information
+	struct if_info *iface = ifinfo;
+	// Show only the default interface as first interface
+	while(iface)
+	{
+		if(iface->default_iface)
+		{
+			send_iface(sock, iface);
+			break;
+		}
+		iface = iface->next;
+	}
+	iface = ifinfo;
+	// Show all but the default interface
+	while(iface)
+	{
+		if(!iface->default_iface)
+			send_iface(sock, iface);
+
+		// Free associated memory
+		struct if_info *next = iface->next;
+		if(iface->name)
+			free(iface->name);
+		if(iface->ip.v4)
+			free(iface->ip.v4);
+		if(iface->ip.v6)
+			free(iface->ip.v6);
+		free(iface);
+		iface = next;
+	}
 }

@@ -17,11 +17,14 @@
 #include <sys/types.h>
 // typedef uni32_t
 #include <stdint.h>
-// assert_sizeof
-#include "static_assert.h"
 // struct in_addr, in6_addr
 #include <netinet/in.h>
+// type bool
+#include <stdbool.h>
+// type FILE
+#include <stdio.h>
 
+void init_config_mutex(void);
 void getLogFilePath(void);
 void read_FTLconf(void);
 void get_privacy_level(FILE *fp);
@@ -47,21 +50,28 @@ typedef struct {
 	bool names_from_netdb :1;
 	bool edns0_ecs :1;
 	bool show_dnssec :1;
-	bool pihole_ptr :1;
 	bool addr2line :1;
 	struct {
 		bool mozilla_canary :1;
+		bool icloud_private_relay :1;
 	} special_domains;
+	struct {
+		bool load :1;
+		unsigned char shmem;
+		unsigned char disk;
+	} check;
 	enum privacy_level privacylevel;
 	enum blocking_mode blockingmode;
 	enum refresh_hostnames refresh_hostnames;
 	enum busy_reply reply_when_busy;
+	enum ptr_type pihole_ptr;
 	int maxDBdays;
 	int port;
 	int maxlogage;
 	int dns_port;
 	unsigned int delay_startup;
 	unsigned int network_expire;
+	unsigned int block_ttl;
 	struct {
 		unsigned int count;
 		unsigned int interval;
@@ -69,13 +79,20 @@ typedef struct {
 	enum debug_flags debug;
 	time_t DBinterval;
 	struct {
-		bool overwrite_v4 :1;
-		bool overwrite_v6 :1;
-		struct in_addr v4;
-		struct in6_addr v6;
+		struct {
+			bool overwrite_v4 :1;
+			bool overwrite_v6 :1;
+			struct in_addr v4;
+			struct in6_addr v6;
+		} own_host;
+		struct {
+			bool overwrite_v4 :1;
+			bool overwrite_v6 :1;
+			struct in_addr v4;
+			struct in6_addr v6;
+		} ip_blocking;
 	} reply_addr;
 } ConfigStruct;
-ASSERT_SIZEOF(ConfigStruct, 80, 72, 72);
 
 typedef struct {
 	const char* conf;

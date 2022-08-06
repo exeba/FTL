@@ -43,16 +43,31 @@ FTLFileNamesStruct FTLfiles = {
 	NULL
 };
 
+pthread_mutex_t lock;
+
 // Private global variables
 static char *conflinebuffer = NULL;
 static size_t size = 0;
 
 // Private prototypes
 static char *parse_FTLconf(FILE *fp, const char * key);
-static void release_config_memory(void);
 static void getpath(FILE* fp, const char *option, const char *defaultloc, char **pointer);
 static void set_nice(const char *buffer, int fallback);
 static bool read_bool(const char *option, const bool fallback);
+
+void init_config_mutex(void)
+{
+	// Initialize the lock attributes
+	pthread_mutexattr_t lock_attr;
+	pthread_mutexattr_init(&lock_attr);
+
+	// Initialize the lock
+	lock = PTHREAD_MUTEX_INITIALIZER;
+	pthread_mutex_init(&lock, &lock_attr);
+
+	// Destroy the lock attributes since we're done with it
+	pthread_mutexattr_destroy(&lock_attr);
+}
 
 void getLogFilePath(void)
 {
@@ -68,7 +83,7 @@ void getLogFilePath(void)
 	}
 
 	// Read LOGFILE value if available
-	// defaults to: "/var/log/pihole-FTL.log"
+	// defaults to: "/var/log/pihole/FTL.log"
 	buffer = parse_FTLconf(fp, "LOGFILE");
 
 	errno = 0;
@@ -76,7 +91,7 @@ void getLogFilePath(void)
 	if(buffer == NULL || sscanf(buffer, "%127ms", &FTLfiles.log) != 1)
 	{
 		// Use standard path if no custom path was obtained from the config file
-		FTLfiles.log = strdup("/var/log/pihole-FTL.log");
+		FTLfiles.log = strdup("/var/log/pihole/FTL.log");
 	}
 
 	// Test if memory allocation was successful
@@ -520,43 +535,129 @@ void read_FTLconf(void)
 	else
 		logg("   RATE_LIMIT: Disabled");
 
-	// REPLY_ADDR4
+	// LOCAL_IPV4
 	// Use a specific IP address instead of automatically detecting the
-	// IPv4 interface address a query arrived on
+	// IPv4 interface address a query arrived on for A hostname queries
 	// defaults to: not set
-	config.reply_addr.overwrite_v4 = false;
-	config.reply_addr.v4.s_addr = 0;
-	buffer = parse_FTLconf(fp, "REPLY_ADDR4");
-	if(buffer != NULL && inet_pton(AF_INET, buffer, &config.reply_addr.v4))
-		config.reply_addr.overwrite_v4 = true;
+	config.reply_addr.own_host.overwrite_v4 = false;
+	config.reply_addr.own_host.v4.s_addr = 0;
+	buffer = parse_FTLconf(fp, "LOCAL_IPV4");
+	if(buffer != NULL && inet_pton(AF_INET, buffer, &config.reply_addr.own_host.v4))
+		config.reply_addr.own_host.overwrite_v4 = true;
 
-	if(config.reply_addr.overwrite_v4)
+	if(config.reply_addr.own_host.overwrite_v4)
 	{
 		char addr[INET_ADDRSTRLEN] = { 0 };
-		inet_ntop(AF_INET, &config.reply_addr.v4, addr, INET_ADDRSTRLEN);
-		logg("   REPLY_ADDR4: Using IPv4 address %s in IP blocking mode", addr);
+		inet_ntop(AF_INET, &config.reply_addr.own_host.v4, addr, INET_ADDRSTRLEN);
+		logg("   LOCAL_IPV4: Using IPv4 address %s for pi.hole and hostname", addr);
 	}
 	else
-		logg("   REPLY_ADDR4: Automatic interface-dependent detection of address");
+		logg("   LOCAL_IPV4: Automatic interface-dependent detection of address");
 
-	// REPLY_ADDR6
+	// LOCAL_IPV6
 	// Use a specific IP address instead of automatically detecting the
-	// IPv6 interface address a query arrived on
+	// IPv6 interface address a query arrived on for AAAA hostname queries
 	// defaults to: not set
-	config.reply_addr.overwrite_v6 = false;
-	memset(&config.reply_addr.v6, 0, sizeof(config.reply_addr.v6));
-	buffer = parse_FTLconf(fp, "REPLY_ADDR6");
-	if(buffer != NULL && inet_pton(AF_INET6, buffer, &config.reply_addr.v6))
-		config.reply_addr.overwrite_v6 = true;
+	config.reply_addr.own_host.overwrite_v6 = false;
+	memset(&config.reply_addr.own_host.v6, 0, sizeof(config.reply_addr.own_host.v6));
+	buffer = parse_FTLconf(fp, "LOCAL_IPV6");
+	if(buffer != NULL && inet_pton(AF_INET6, buffer, &config.reply_addr.own_host.v6))
+		config.reply_addr.own_host.overwrite_v6 = true;
 
-	if(config.reply_addr.overwrite_v6)
+	if(config.reply_addr.own_host.overwrite_v6)
 	{
 		char addr[INET6_ADDRSTRLEN] = { 0 };
-		inet_ntop(AF_INET6, &config.reply_addr.v6, addr, INET6_ADDRSTRLEN);
-		logg("   REPLY_ADDR6: Using IPv6 address %s in IP blocking mode", addr);
+		inet_ntop(AF_INET6, &config.reply_addr.own_host.v6, addr, INET6_ADDRSTRLEN);
+		logg("   LOCAL_IPV6: Using IPv6 address %s for pi.hole and hostname", addr);
 	}
 	else
-		logg("   REPLY_ADDR6: Automatic interface-dependent detection of address");
+		logg("   LOCAL_IPV6: Automatic interface-dependent detection of address");
+
+	// BLOCK_IPV4
+	// Use a specific IPv4 address for IP blocking mode replies
+	// defaults to: REPLY_ADDR4 setting
+	config.reply_addr.ip_blocking.overwrite_v4 = false;
+	config.reply_addr.ip_blocking.v4.s_addr = 0;
+	buffer = parse_FTLconf(fp, "BLOCK_IPV4");
+	if(buffer != NULL && inet_pton(AF_INET, buffer, &config.reply_addr.ip_blocking.v4))
+		config.reply_addr.ip_blocking.overwrite_v4 = true;
+
+	if(config.reply_addr.ip_blocking.overwrite_v4)
+	{
+		char addr[INET_ADDRSTRLEN] = { 0 };
+		inet_ntop(AF_INET, &config.reply_addr.ip_blocking.v4, addr, INET_ADDRSTRLEN);
+		logg("   BLOCK_IPV4: Using IPv4 address %s in IP blocking mode", addr);
+	}
+	else
+		logg("   BLOCK_IPV4: Automatic interface-dependent detection of address");
+
+	// BLOCK_IPV6
+	// Use a specific IPv6 address for IP blocking mode replies
+	// defaults to: REPLY_ADDR6 setting
+	config.reply_addr.ip_blocking.overwrite_v6 = false;
+	memset(&config.reply_addr.ip_blocking.v6, 0, sizeof(config.reply_addr.own_host.v6));
+	buffer = parse_FTLconf(fp, "BLOCK_IPV6");
+	if(buffer != NULL && inet_pton(AF_INET6, buffer, &config.reply_addr.ip_blocking.v6))
+		config.reply_addr.ip_blocking.overwrite_v6 = true;
+
+	if(config.reply_addr.ip_blocking.overwrite_v6)
+	{
+		char addr[INET6_ADDRSTRLEN] = { 0 };
+		inet_ntop(AF_INET6, &config.reply_addr.ip_blocking.v6, addr, INET6_ADDRSTRLEN);
+		logg("   BLOCK_IPV6: Using IPv6 address %s in IP blocking mode", addr);
+	}
+	else
+		logg("   BLOCK_IPV6: Automatic interface-dependent detection of address");
+
+	// REPLY_ADDR4 (deprecated setting)
+	// Use a specific IP address instead of automatically detecting the
+	// IPv4 interface address a query arrived on A hostname and IP blocked queries
+	// defaults to: not set
+	struct in_addr reply_addr4;
+	buffer = parse_FTLconf(fp, "REPLY_ADDR4");
+	if(buffer != NULL && inet_pton(AF_INET, buffer, &reply_addr4))
+	{
+		if(config.reply_addr.own_host.overwrite_v4 || config.reply_addr.ip_blocking.overwrite_v4)
+		{
+			logg("   WARNING: Ignoring REPLY_ADDR4 as LOCAL_IPV4 or BLOCK_IPV4 has been specified.");
+		}
+		else
+		{
+			config.reply_addr.own_host.overwrite_v4 = true;
+			memcpy(&config.reply_addr.own_host.v4, &reply_addr4, sizeof(reply_addr4));
+			config.reply_addr.ip_blocking.overwrite_v4 = true;
+			memcpy(&config.reply_addr.ip_blocking.v4, &reply_addr4, sizeof(reply_addr4));
+
+			char addr[INET_ADDRSTRLEN] = { 0 };
+			inet_ntop(AF_INET, &reply_addr4, addr, INET_ADDRSTRLEN);
+			logg("   REPLY_ADDR4: Using IPv4 address %s instead of automatically determined IP address", addr);
+		}
+	}
+
+	// REPLY_ADDR6 (deprecated setting)
+	// Use a specific IP address instead of automatically detecting the
+	// IPv4 interface address a query arrived on A hostname and IP blocked queries
+	// defaults to: not set
+	struct in6_addr reply_addr6;
+	buffer = parse_FTLconf(fp, "REPLY_ADDR6");
+	if(buffer != NULL && inet_pton(AF_INET, buffer, &reply_addr6))
+	{
+		if(config.reply_addr.own_host.overwrite_v6 || config.reply_addr.ip_blocking.overwrite_v6)
+		{
+			logg("   WARNING: Ignoring REPLY_ADDR6 as LOCAL_IPV6 or BLOCK_IPV6 has been specified.");
+		}
+		else
+		{
+			config.reply_addr.own_host.overwrite_v6 = true;
+			memcpy(&config.reply_addr.own_host.v6, &reply_addr6, sizeof(reply_addr6));
+			config.reply_addr.ip_blocking.overwrite_v6 = true;
+			memcpy(&config.reply_addr.ip_blocking.v6, &reply_addr6, sizeof(reply_addr6));
+
+			char addr[INET6_ADDRSTRLEN] = { 0 };
+			inet_ntop(AF_INET6, &reply_addr6, addr, INET6_ADDRSTRLEN);
+			logg("   REPLY_ADDR6: Using IPv6 address %s instead of automatically determined IP address", addr);
+		}
+	}
 
 	// SHOW_DNSSEC
 	// Should FTL analyze and include automatically generated DNSSEC queries in the Query Log?
@@ -582,14 +683,30 @@ void read_FTLconf(void)
 
 	// PIHOLE_PTR
 	// Should FTL return "pi.hole" as name for PTR requests to local IP addresses?
-	// defaults to: true
+	// defaults to: PI.HOLE
 	buffer = parse_FTLconf(fp, "PIHOLE_PTR");
-	config.pihole_ptr = read_bool(buffer, true);
 
-	if(config.pihole_ptr)
-		logg("   PIHOLE_PTR: Enabled");
+	if(buffer != NULL && (strcasecmp(buffer, "none") == 0 ||
+	                      strcasecmp(buffer, "false") == 0))
+	{
+		config.pihole_ptr = PTR_NONE;
+		logg("   PIHOLE_PTR: internal PTR generation disabled");
+	}
+	else if(buffer != NULL && strcasecmp(buffer, "hostname") == 0)
+	{
+		config.pihole_ptr = PTR_HOSTNAME;
+		logg("   PIHOLE_PTR: internal PTR generation enabled (hostname)");
+	}
+	else if(buffer != NULL && strcasecmp(buffer, "hostnamefqdn") == 0)
+	{
+		config.pihole_ptr = PTR_HOSTNAMEFQDN;
+		logg("   PIHOLE_PTR: internal PTR generation enabled (fully-qualified hostname)");
+	}
 	else
-		logg("   PIHOLE_PTR: Disabled");
+	{
+		config.pihole_ptr = PTR_PIHOLE;
+		logg("   PIHOLE_PTR: internal PTR generation enabled (pi.hole)");
+	}
 
 	// ADDR2LINE
 	// Should FTL try to call addr2line when generating backtraces?
@@ -604,13 +721,13 @@ void read_FTLconf(void)
 
 	// REPLY_WHEN_BUSY
 	// How should FTL handle queries when the gravity database is not available?
-	// defaults to: BLOCK
+	// defaults to: DROP
 	buffer = parse_FTLconf(fp, "REPLY_WHEN_BUSY");
 
-	if(buffer != NULL && strcasecmp(buffer, "DROP") == 0)
+	if(buffer != NULL && strcasecmp(buffer, "ACCEPT") == 0)
 	{
-		config.reply_when_busy = BUSY_DROP;
-		logg("   REPLY_WHEN_BUSY: Drop queries when the database is busy");
+		config.reply_when_busy = BUSY_ALLOW;
+		logg("   REPLY_WHEN_BUSY: Permit queries when the database is busy");
 	}
 	else if(buffer != NULL && strcasecmp(buffer, "REFUSE") == 0)
 	{
@@ -624,17 +741,78 @@ void read_FTLconf(void)
 	}
 	else
 	{
-		config.reply_when_busy = BUSY_ALLOW;
-		logg("   REPLY_WHEN_BUSY: Permit queries when the database is busy");
+		config.reply_when_busy = BUSY_DROP;
+		logg("   REPLY_WHEN_BUSY: Drop queries when the database is busy");
 	}
+
+	// BLOCK_TTL
+	// defaults to: 2 seconds
+	config.block_ttl = 2;
+	buffer = parse_FTLconf(fp, "BLOCK_TTL");
+
+	unsigned int uval = 0;
+	if(buffer != NULL && sscanf(buffer, "%u", &uval))
+		config.block_ttl = uval;
+
+	if(config.block_ttl == 1)
+		logg("   BLOCK_TTL: 1 second");
+	else
+		logg("   BLOCK_TTL: %u seconds", config.block_ttl);
+
+	// BLOCK_ICLOUD_PR
+	// Should FTL handle the iCloud privacy relay domains specifically and
+	// always return NXDOMAIN?
+	// defaults to: true
+	buffer = parse_FTLconf(fp, "BLOCK_ICLOUD_PR");
+	config.special_domains.icloud_private_relay = read_bool(buffer, true);
+
+	if(config.special_domains.icloud_private_relay)
+		logg("   BLOCK_ICLOUD_PR: Enabled");
+	else
+		logg("   BLOCK_ICLOUD_PR: Disabled");
+
+	// CHECK_LOAD
+	// Should FTL check the 15 min average of CPU load and complain if the
+	// load is larger than the number of available CPU cores?
+	// defaults to: true
+	buffer = parse_FTLconf(fp, "CHECK_LOAD");
+	config.check.load = read_bool(buffer, true);
+
+	if(config.check.load)
+		logg("   CHECK_LOAD: Enabled");
+	else
+		logg("   CHECK_LOAD: Disabled");
+
+	// CHECK_SHMEM
+	// Limit above which FTL should complain about a shared-memory shortage
+	// defaults to: 90%
+	config.check.shmem = 90;
+	buffer = parse_FTLconf(fp, "CHECK_SHMEM");
+
+	if(buffer != NULL &&
+	    sscanf(buffer, "%i", &ivalue) &&
+	    ivalue >= 0 && ivalue <= 100)
+			config.check.shmem = ivalue;
+
+	logg("   CHECK_SHMEM: Warning if shared-memory usage exceeds %d%%", config.check.shmem);
+
+	// CHECK_DISK
+	// Limit above which FTL should complain about disk shortage for checked files
+	// defaults to: 90%
+	config.check.disk = 90;
+	buffer = parse_FTLconf(fp, "CHECK_DISK");
+
+	if(buffer != NULL &&
+	    sscanf(buffer, "%i", &ivalue) &&
+	    ivalue >= 0 && ivalue <= 100)
+			config.check.disk = ivalue;
+
+	logg("   CHECK_DISK: Warning if certain disk usage exceeds %d%%", config.check.disk);
 
 	// Read DEBUG_... setting from pihole-FTL.conf
 	read_debuging_settings(fp);
 
 	logg("Finished config file parsing");
-
-	// Release memory
-	release_config_memory();
 
 	if(fp != NULL)
 		fclose(fp);
@@ -674,7 +852,7 @@ static void getpath(FILE* fp, const char *option, const char *defaultloc, char *
 	}
 }
 
-static char *parse_FTLconf(FILE *fp, const char * key)
+static char *parse_FTLconf(FILE *fp, const char *key)
 {
 	// Return NULL if fp is an invalid file pointer
 	if(fp == NULL)
@@ -688,11 +866,23 @@ static char *parse_FTLconf(FILE *fp, const char * key)
 	}
 	sprintf(keystr, "%s=", key);
 
+	// Lock mutex
+	const int lret = pthread_mutex_lock(&lock);
+	if(config.debug & DEBUG_LOCKS)
+		logg("Obtained config lock");
+	if(lret != 0)
+		logg("Error when obtaining config lock: %s", strerror(lret));
+
 	// Go to beginning of file
 	fseek(fp, 0L, SEEK_SET);
 
 	if(config.debug & DEBUG_EXTRA)
 		logg("initial: conflinebuffer = %p, keystr = %p, size = %zu", conflinebuffer, keystr, size);
+
+	// Set size to zero if conflinebuffer is not available here
+	// This causes getline() to allocate memory for the buffer itself
+	if(conflinebuffer == NULL && size != 0)
+		size = 0;
 
 	errno = 0;
 	while(getline(&conflinebuffer, &size, fp) != -1)
@@ -714,34 +904,40 @@ static char *parse_FTLconf(FILE *fp, const char * key)
 		if((strstr(conflinebuffer, keystr)) == NULL)
 			continue;
 
-		// otherwise: key found
-		free(keystr);
-		// Note: value is still a pointer into the conflinebuffer
-		//       its memory will get released in release_config_memory()
+		// *** MATCH ****
+
+		// Note: value is still a pointer into the conflinebuffer,
+		// no need to duplicate memory here
 		char *value = find_equals(conflinebuffer) + 1;
-		// Trim whitespace at beginning and end, this function
-		// modifies the string inplace
+
+		// Trim whitespace at beginning and end, this function modifies
+		// the string inplace
 		trim_whitespace(value);
+
+		const int uret = pthread_mutex_unlock(&lock);
+		if(config.debug & DEBUG_LOCKS)
+			logg("Released config lock (match)");
+		if(uret != 0)
+			logg("Error when releasing config lock (match): %s", strerror(uret));
+
+		// Free keystr memory
+		free(keystr);
 		return value;
 	}
 
 	if(errno == ENOMEM)
 		logg("WARN: parse_FTLconf failed: could not allocate memory for getline");
 
+	const int uret = pthread_mutex_unlock(&lock);
+	if(config.debug & DEBUG_LOCKS)
+		logg("Released config lock (no match)");
+	if(uret != 0)
+		logg("Error when releasing config lock (no match): %s", strerror(uret));
+
 	// Key not found or memory error -> return NULL
 	free(keystr);
 
 	return NULL;
-}
-
-void release_config_memory(void)
-{
-	if(conflinebuffer != NULL)
-	{
-		free(conflinebuffer);
-		conflinebuffer = NULL;
-		size = 0;
-	}
 }
 
 void get_privacy_level(FILE *fp)
@@ -770,9 +966,6 @@ void get_privacy_level(FILE *fp)
 			config.privacylevel = value;
 		}
 	}
-
-	// Release memory
-	release_config_memory();
 
 	// Have to close the config file if we opened it
 	if(opened)
@@ -812,9 +1005,6 @@ void get_blocking_mode(FILE *fp)
 		else
 			logg("Ignoring unknown blocking mode, fallback is NULL blocking");
 	}
-
-	// Release memory
-	release_config_memory();
 
 	// Have to close the config file if we opened it
 	if(opened)
@@ -982,14 +1172,7 @@ void read_debuging_settings(FILE *fp)
 
 	// Have to close the config file if we opened it
 	if(opened)
-	{
 		fclose(fp);
-
-		// Release memory only when we opened the file
-		// Otherwise, it may still be needed outside of
-		// this function (initial config parsing)
-		release_config_memory();
-	}
 }
 
 

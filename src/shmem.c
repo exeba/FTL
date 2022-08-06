@@ -16,8 +16,6 @@
 #include "config.h"
 // data getter functions
 #include "datastructure.h"
-// statvfs()
-#include <sys/statvfs.h>
 // get_num_regex()
 #include "regex_r.h"
 // NAME_MAX
@@ -26,6 +24,10 @@
 #include "daemon.h"
 // generate_backtrace()
 #include "signals.h"
+// get_path_usage()
+#include "files.h"
+// log_resource_shortage()
+#include "database/message-table.h"
 
 /// The version of shared memory used
 #define SHARED_MEMORY_VERSION 14
@@ -43,10 +45,6 @@
 #define SHARED_SETTINGS_NAME "/FTL-settings"
 #define SHARED_DNS_CACHE "/FTL-dns-cache"
 #define SHARED_PER_CLIENT_REGEX "/FTL-per-client-regex"
-
-// Limit from which on we warn users about space running out in SHMEM_PATH
-// default: 90%
-#define SHMEM_WARN_LIMIT 90
 
 // Allocation step for FTL-strings bucket. This is somewhat special as we use
 // this as a general-purpose storage which should always be large enough. If,
@@ -114,44 +112,20 @@ static void *enlarge_shmem_struct(const char type);
 
 static int get_dev_shm_usage(char buffer[64])
 {
-	// Get filesystem information about /dev/shm (typically a tmpfs)
-	struct statvfs f;
-	if(statvfs(SHMEM_PATH, &f) != 0)
-	{
-		// If statvfs() failed, we return the error instead
-		strncpy(buffer, strerror(errno), 64);
-		buffer[63] = '\0';
-		return 0;
-	}
-
-	// Explicitly cast the block counts to unsigned long long to avoid
-	// overflowing with drives larger than 4 GB on 32bit systems
-	const unsigned long long size = (unsigned long long)f.f_blocks * f.f_frsize;
-	const unsigned long long free = (unsigned long long)f.f_bavail * f.f_bsize;
-	const unsigned long long used = size - free;
-
-	// Create human-readable total size
-	char prefix_size[2] = { 0 };
-	double formated_size = 0.0;
-	format_memory_size(prefix_size, size, &formated_size);
-
-	// Generate human-readable "total used" size
-	char prefix_used[2] = { 0 };
-	double formated_used = 0.0;
-	format_memory_size(prefix_used, used, &formated_used);
+	char buffer2[64] = { 0 };
+	const int percentage = get_path_usage(SHMEM_PATH, buffer2);
 
 	// Generate human-readable "used by FTL" size
 	char prefix_FTL[2] = { 0 };
-	double formated_FTL = 0.0;
-	format_memory_size(prefix_FTL, used_shmem, &formated_FTL);
+	double formatted_FTL = 0.0;
+	format_memory_size(prefix_FTL, used_shmem, &formatted_FTL);
 
 	// Print result into buffer passed to this subroutine
-	snprintf(buffer, 64, SHMEM_PATH": %.1f%sB used, %.1f%sB total, FTL uses %.1f%sB",
-	         formated_used, prefix_used, formated_size, prefix_size, formated_FTL, prefix_FTL);
+	snprintf(buffer, 64, "%s, FTL uses %.1f%sB",
+	         buffer2, formatted_FTL, prefix_FTL);
 
-	// Return percentage of used shared memory
-	// Adding 1 avoids FPE if the size turns out to be zero
-	return (used*100)/(size + 1);
+	// Return percentage
+	return percentage;
 }
 
 // chown_shmem() changes the file ownership of a given shared memory object
@@ -187,7 +161,7 @@ static char *__attribute__ ((malloc)) str_replace(const char *input,
 {
 	// Duplicate string
 	char *copy = strdup(input);
-	if(copy == NULL)
+	if(!copy)
 		return NULL;
 
 	// Woring pointer
@@ -202,36 +176,45 @@ static char *__attribute__ ((malloc)) str_replace(const char *input,
 	return copy;
 }
 
-char *str_escape(const char *input, unsigned int *N)
+char *__attribute__ ((malloc)) str_escape(const char *input, unsigned int *N)
 {
 	// If no escaping is done, this routine returns the original pointer
 	// and N stays 0
 	*N = 0;
-	char *out = (char *)input;
 	if(strchr(input, ' ') != NULL)
 	{
 		// Replace any spaces by ~ if we find them in the domain name
 		// This is necessary as our telnet API uses space delimiters
-		out = str_replace(out, ' ', '~', N);
+		return str_replace(input, ' ', '~', N);
 	}
-	return out;
+
+	return strdup(input);
 }
 
 bool strcmp_escaped(const char *a, const char *b)
 {
+	unsigned int Na, Nb;
+
+	// Input check
 	if(a == NULL || b == NULL)
 		return false;
 
-	unsigned int Na, Nb;
+	// Escape both inputs
 	char *aa = str_escape(a, &Na);
 	char *bb = str_escape(b, &Nb);
 
+	// Check for memory errors
+	if(!aa || !bb)
+	{
+		if(aa) free(aa);
+		if(bb) free(bb);
+		return false;
+	}
+
 	const char result = strcasecmp(aa, bb) == 0;
 
-	if(Na > 0)
-		free(aa);
-	if(Nb > 0)
-		free(bb);
+	free(aa);
+	free(bb);
 
 	return result;
 }
@@ -272,7 +255,7 @@ size_t addstr(const char *input)
 	char *str = str_escape(input, &N);
 
 	if(N > 0)
-		logg("INFO: FTL escaped %u characters in \"%s\"", N, str);
+		logg("INFO: FTL replaced %u invalid characters with ~ in the query \"%s\"", N, str);
 
 	// Debugging output
 	if(config.debug & DEBUG_SHMEM)
@@ -280,8 +263,7 @@ size_t addstr(const char *input)
 
 	// Copy the C string pointed by str into the shared string buffer
 	strncpy(&((char*)shm_strings.ptr)[shmSettings->next_str_pos], str, len);
-	if(N > 0)
-		free(str);
+	free(str);
 
 	// Increment string length counter
 	shmSettings->next_str_pos += len;
@@ -577,14 +559,14 @@ bool init_shmem(bool create_new)
 	return true;
 }
 
-// CHOWN all shared memory objects to suppplied user/group
+// CHOWN all shared memory objects to supplied user/group
 void chown_all_shmem(struct passwd *ent_pw)
 {
 	for(unsigned int i = 0; i < NUM_SHMEM; i++)
 		chown_shmem(sharedMemories[i], ent_pw);
 }
 
-// Destory mutex and, subsequently, delete all shared memory objects
+// Destroy mutex and, subsequently, delete all shared memory objects
 void destroy_shmem(void)
 {
 	// First, we destroy the mutex
@@ -611,12 +593,12 @@ static SharedMemory create_shm(const char *name, const size_t size, bool create_
 {
 	char df[64] =  { 0 };
 	const int percentage = get_dev_shm_usage(df);
-	if(config.debug & DEBUG_SHMEM || percentage > SHMEM_WARN_LIMIT)
+	if(config.debug & DEBUG_SHMEM || (config.check.shmem > 0 && percentage > config.check.shmem))
 	{
 		logg("Creating shared memory with name \"%s\" and size %zu (%s)", name, size, df);
 	}
-	if(percentage > SHMEM_WARN_LIMIT)
-		logg("WARNING: More than %u%% of "SHMEM_PATH" is used", SHMEM_WARN_LIMIT);
+	if(config.check.shmem > 0 && percentage > config.check.shmem)
+		log_resource_shortage(-1.0, 0, percentage, -1, SHMEM_PATH, df);
 
 	SharedMemory sharedMemory = {
 		.name = name,
@@ -754,8 +736,8 @@ static bool realloc_shm(SharedMemory *sharedMemory, const size_t size1, const si
 		logg("Remapping \"%s\" from %zu to (%zu * %zu) == %zu",
 		     sharedMemory->name, sharedMemory->size, size1, size2, size);
 
-	if(percentage > SHMEM_WARN_LIMIT)
-		logg("WARNING: More than %u%% of "SHMEM_PATH" is used", SHMEM_WARN_LIMIT);
+	if(config.check.shmem > 0 && percentage > config.check.shmem)
+		log_resource_shortage(-1.0, 0, percentage, -1, SHMEM_PATH, df);
 
 	// Resize shard memory object if requested
 	// If not, we only remap a shared memory object which might have changed

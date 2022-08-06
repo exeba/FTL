@@ -153,7 +153,7 @@ void FTL_parse_pseudoheaders(struct dns_header *header, size_t n, union mysockad
 		return;
 
 	size_t offset; // The header is 11 bytes before the beginning of OPTION-DATA
-	while ((offset = (p - pheader - 11u)) < rdlen)
+	while ((offset = (p - pheader - 11u)) < rdlen && rdlen < UINT16_MAX)
 	{
 		unsigned short code, optlen;
 		GETSHORT(code, p);
@@ -200,23 +200,29 @@ void FTL_parse_pseudoheaders(struct dns_header *header, size_t n, union mysockad
 			//   8: |                           ADDRESS...                          /
 			//      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 			union all_addr addr = {{ 0 }};
-			if(family == 1 && optlen == 4 + sizeof(addr.addr4.s_addr)) // IPv4
-				memcpy(&addr.addr4.s_addr, p, sizeof(addr.addr4.s_addr));
-			else if(family == 2 && optlen == 4 + sizeof(addr.addr6.s6_addr)) // IPv6
-				memcpy(addr.addr6.s6_addr, p, sizeof(addr.addr6.s6_addr));
+			const size_t addrlen = optlen - 4;
+			if(family == 1 && addrlen <= sizeof(addr.addr4.s_addr)) // IPv4
+				memcpy(&addr.addr4.s_addr, p, addrlen);
+			else if(family == 2 && addrlen <= sizeof(addr.addr6.s6_addr)) // IPv6
+				memcpy(addr.addr6.s6_addr, p, addrlen);
 			else
 				continue;
 
 			// Advance working pointer (we already walked 4 bytes above)
 			p += optlen - 4;
-			
+
 			char ipaddr[ADDRSTRLEN] = { 0 };
 			inet_ntop(family == 1 ? AF_INET : AF_INET6, &addr.addr4.s_addr, ipaddr, sizeof(ipaddr));
 
 			// Only use /32 (IPv4) and /128 (IPv6) addresses
 			if(!(family == 1 && source_netmask == 32) &&
 			   !(family == 2 && source_netmask == 128))
+			{
+				if(config.debug & DEBUG_EDNS0)
+					logg("EDNS(0) CLIENT SUBNET: %s/%u found (IPv%u)",
+					     ipaddr, source_netmask, family == 1 ? 4 : 6);
 				continue;
+			}
 
 			// Copy data to edns struct
 			strncpy(edns->client, ipaddr, ADDRSTRLEN);
@@ -329,9 +335,9 @@ void FTL_parse_pseudoheaders(struct dns_header *header, size_t n, union mysockad
 			// Advance working pointer
 			p += 8;
 		}
-		else if(code == EDNS0_CPE_ID)
+		else if(code == EDNS0_CPE_ID && optlen < 256)
 		{
-			// EDNS(0) CPE-ID
+			// EDNS(0) CPE-ID, 256 byte arbitrary limit
 			unsigned char payload[optlen + 1u]; // variable length
 			memcpy(payload, p, optlen);
 			payload[optlen] = '\0';

@@ -26,6 +26,8 @@
 #include "procps.h"
 // init_overtime()
 #include "overTime.h"
+// flush_message_table()
+#include "database/message-table.h"
 
 char * username;
 bool needGC = false;
@@ -47,6 +49,7 @@ int main (int argc, char* argv[])
 	parse_args(argc, argv);
 
 	// Try to open FTL log
+	init_config_mutex();
 	init_FTL_log();
 	timer_start(EXIT_TIMER);
 	logg("########## FTL started on %s! ##########", hostname());
@@ -85,6 +88,9 @@ int main (int argc, char* argv[])
 	// Initialize query database (pihole-FTL.db)
 	db_init();
 
+	// Flush messages stored in the long-term database
+	flush_message_table();
+
 	// Try to import queries from long-term database if available
 	if(config.DBimport)
 		DB_read_queries();
@@ -92,9 +98,9 @@ int main (int argc, char* argv[])
 	log_counter_info();
 	check_setupVarsconf();
 
-	// Check for availability of advanced capabilities
-	// immediately before starting the resolver.
-	check_capabilities();
+	// Check for availability of capabilities in debug mode
+	if(config.debug & DEBUG_CAPS)
+		check_capabilities();
 
 	// Start the resolver
 	startup = false;

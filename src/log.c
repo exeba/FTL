@@ -96,7 +96,7 @@ void _FTL_log(const bool newline, const bool debug, const char *format, ...)
 	char idstr[42];
 	const int pid = getpid(); // Get the process ID of the calling process
 	const int mpid = main_pid(); // Get the process ID of the main FTL process
-	const int tid = gettid(); // Get the thread ID of the callig process
+	const int tid = gettid(); // Get the thread ID of the calling process
 
 	// There are four cases we have to differentiate here:
 	if(pid == tid)
@@ -196,21 +196,22 @@ void FTL_log_helper(const unsigned int n, ...)
 			free(arg[i]);
 }
 
-void format_memory_size(char * const prefix, const unsigned long long int bytes,
-                        double * const formated)
+void format_memory_size(char prefix[2], const unsigned long long int bytes,
+                        double * const formatted)
 {
 	unsigned int i;
-	*formated = bytes;
+	*formatted = bytes;
 	// Determine exponent for human-readable display
 	for(i = 0; i < 7; i++)
 	{
-		if(*formated <= 1e3)
+		if(*formatted <= 1e3)
 			break;
-		*formated /= 1e3;
+		*formatted /= 1e3;
 	}
-	const char* prefixes[8] = { " ", "K", "M", "G", "T", "P", "E", "?" };
+	const char prefixes[8] = { '\0', 'K', 'M', 'G', 'T', 'P', 'E', '?' };
 	// Chose matching SI prefix
-	strcpy(prefix, prefixes[i]);
+	prefix[0] = prefixes[i];
+	prefix[1] = '\0';
 }
 
 // Human-readable time
@@ -278,7 +279,11 @@ void log_FTL_version(const bool crashreport)
 	logg("FTL commit: %s", GIT_HASH);
 	logg("FTL date: %s", GIT_DATE);
 	if(crashreport)
-		logg("FTL user: started as %s, ended as %s", username, getUserName());
+	{
+		char *username_now = getUserName();
+		logg("FTL user: started as %s, ended as %s", username, username_now);
+		free(username_now);
+	}
 	else
 		logg("FTL user: %s", username);
 	logg("Compiled for %s using %s", FTL_ARCH, FTL_CC);
@@ -340,7 +345,7 @@ const char __attribute__ ((const)) *get_ordinal_suffix(unsigned int number)
 	// For example: 2nd, 7th, 20th, 23rd, 52nd, 135th, 301st BUT 311th (covered above)
 }
 
-// Converts a buffer of specified lenth to ASCII representation as it was a C
+// Converts a buffer of specified length to ASCII representation as it was a C
 // string literal. Returns how much bytes from source was processed
 // Inspired by https://stackoverflow.com/a/56123950
 int binbuf_to_escaped_C_literal(const char *src_buf, size_t src_sz,
@@ -441,4 +446,25 @@ const char * __attribute__ ((pure)) short_path(const char *full_path)
 {
 	const char *shorter = strstr(full_path, "src/");
 	return shorter != NULL ? shorter : full_path;
+}
+
+void print_FTL_version(void)
+{
+    printf("Pi-hole FTL %s\n", get_FTL_version());
+}
+
+// Skip leading string if found
+static char *skipStr(const char *startstr, char *message)
+{
+	const size_t startlen = strlen(startstr);
+	if(strncmp(startstr, message, startlen) == 0)
+		return message + startlen;
+	else
+		return message;
+}
+
+void dnsmasq_diagnosis_warning(char *message)
+{
+	// Crop away any existing initial "warning: "
+	logg_warn_dnsmasq_message(skipStr("warning: ", message));
 }

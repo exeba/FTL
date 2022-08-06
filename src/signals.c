@@ -56,7 +56,7 @@ static void print_addr2line(const char *symbol, const void *address, const int j
 	if(strstr(symbol, BINARY_NAME) == NULL)
 		return;
 
-	// Find first occurence of '(' or ' ' in the obtaned symbol string and
+	// Find first occurrence of '(' or ' ' in the obtaned symbol string and
 	// assume everything before that is the file name. (Don't go beyond the
 	// string terminator \0)
 	int p = 0;
@@ -105,7 +105,10 @@ void generate_backtrace(void)
 
 	char ** bcktrace = backtrace_symbols(buffer, calls);
 	if(bcktrace == NULL)
+	{
 		logg("Unable to obtain backtrace symbols!");
+		return;
+	}
 
 	// Try to compute binary offset from backtrace_symbols result
 	void *offset = NULL;
@@ -127,8 +130,7 @@ void generate_backtrace(void)
 		if(bcktrace != NULL)
 			print_addr2line(bcktrace[j], buffer[j], j, offset);
 	}
-	if(bcktrace != NULL)
-		free(bcktrace);
+	free(bcktrace);
 #else
 	logg("!!! INFO: pihole-FTL has not been compiled with glibc/backtrace support, not generating one !!!");
 #endif
@@ -188,7 +190,7 @@ static void __attribute__((noreturn)) signal_handler(int sig, siginfo_t *si, voi
 		switch (si->si_code)
 		{
 			case BUS_ADRALN:    logg("     with code:  BUS_ADRALN (Invalid address alignment)"); break;
-			case BUS_ADRERR:    logg("     with code:  BUS_ADRERR (Non-existant physical address)"); break;
+			case BUS_ADRERR:    logg("     with code:  BUS_ADRERR (Non-existent physical address)"); break;
 			case BUS_OBJERR:    logg("     with code:  BUS_OBJERR (Object specific hardware error)"); break;
 #ifndef __FreeBSD__
 			case BUS_MCEERR_AR: logg("     with code:  BUS_MCEERR_AR (Hardware memory error: action required)"); break;
@@ -297,8 +299,8 @@ static void SIGRT_handler(int signum, siginfo_t *si, void *unused)
 		// Reload the privacy level in case the user changed it
 		set_event(RELOAD_PRIVACY_LEVEL);
 
-		// Reload blocking mode
-		set_event(RELOAD_BLOCKINGMODE);
+		// Reload blocking status
+		set_event(RELOAD_BLOCKINGSTATUS);
 	}
 	else if(rtsig == 2)
 	{
@@ -333,7 +335,7 @@ void handle_signals(void)
 {
 	struct sigaction old_action;
 
-	const int signals[] = { SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE };
+	const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE };
 	for(unsigned int i = 0; i < sizeof(signals)/sizeof(signals[0]); i++)
 	{
 		// Catch this signal

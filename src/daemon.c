@@ -22,14 +22,15 @@
 #include "api/socket.h"
 // gravityDB_close()
 #include "database/gravity-db.h"
-// dbclose()
-#include "database/common.h"
 // destroy_shmem()
 #include "shmem.h"
 // uname()
 #include <sys/utsname.h>
 // killed
 #include "signals.h"
+// clock_gettime()
+#include <time.h>
+#include <errno.h>
 
 pthread_t threads[THREADS_MAX] = { 0 };
 pthread_t api_threads[MAX_API_THREADS] = { 0 };
@@ -127,11 +128,22 @@ static void removepid(void)
 		return;
 	}
 	fclose(f);
+
+	// We also try to remove the file. We still empty the file above
+	// to ensure it is at least empty when it cannot be removed.
+	// because removing files on Linux is actually unlinking them.
+	// If any processes still have the file open, it will remain
+	// in existence until the last file descriptor referring to
+	// it is closed.
+	if(remove(FTLfiles.pid) != 0)
+	{
+		logg("WARNING: Unable to remove PID file: %s", strerror(errno));
+	}
 }
 
 char *getUserName(void)
 {
-	char * name;
+	char *name;
 	// the getpwuid() function shall search the user database for an entry with a matching uid
 	// the geteuid() function shall return the effective user ID of the calling process - this is used as the search criteria for the getpwuid() function
 	const uid_t euid = geteuid();
@@ -179,11 +191,25 @@ void delay_startup(void)
 	if(config.delay_startup == 0u)
 		return;
 
+	// Get uptime of system
+	struct timespec time_spec;
+	if (clock_gettime(GETTIME_OPTION, &time_spec) == 0)
+	{
+		if(time_spec.tv_sec > DELAY_UPTIME)
+		{
+			logg("Not sleeping as system has finished booting");
+			return;
+		}
+	}
+	else
+	{
+		logg("Unable to obtain sysinfo: %s (%i)", strerror(errno), errno);
+	}
+
 	// Sleep if requested by DELAY_STARTUP
-	logg("Sleeping for %d seconds as requested by configuration ...",
-	     config.delay_startup);
+	logg("Sleeping for %d seconds as requested by configuration ...", config.delay_startup);
 	sleep(config.delay_startup);
-	logg("Done sleeping, continuing startup of resolver...\n");
+	logg("Done sleeping, continuing startup of resolver...");
 }
 
 // Is this a fork?
@@ -233,7 +259,7 @@ static void terminate_threads(void)
 
 		if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
 		{
-			logg("Thread %s (%d) is busy, cancelling it (cannot set timout).",
+			logg("Thread %s (%d) is busy, cancelling it (cannot set timeout).",
 			     thread_names[i], i);
 			pthread_cancel(threads[i]);
 			continue;

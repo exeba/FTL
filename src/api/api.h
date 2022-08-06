@@ -27,9 +27,13 @@ void getClientID(const int *sock);
 void getVersion(const int *sock);
 void getDBstats(const int *sock);
 void getUnknownQueries(const int *sock);
+void getMAXLOGAGE(const int *sock);
+void getGateway(const int *sock);
+void getInterfaces(const int *sock);
 
 // DNS resolver methods (dnsmasq_interface.c)
 void getCacheInformation(const int *sock);
+void getDNSport(const int *sock);
 
 // MessagePack serialization helpers
 void pack_eom(const int sock);

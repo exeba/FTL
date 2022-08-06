@@ -73,7 +73,7 @@ void _dbclose(sqlite3 **db, const char *func, const int line, const char *file)
 	}
 
 	// Always set database pointer to NULL, even when closing failed
-	*db = NULL;
+	if(db) *db = NULL;
 }
 
 sqlite3* _dbopen(bool create, const char *func, const int line, const char *file)
@@ -149,7 +149,6 @@ int dbquery(sqlite3* db, const char *format, ...)
 		logg("ERROR: SQL query \"%s\" failed: %s",
 		     query, sqlite3_errstr(rc));
 		sqlite3_free(query);
-		dbclose(&db);
 		checkFTLDBrc(rc);
 		return rc;
 	}
@@ -172,16 +171,32 @@ static bool create_counter_table(sqlite3* db)
 	SQL_bool(db, "CREATE TABLE counters ( id INTEGER PRIMARY KEY NOT NULL, value INTEGER NOT NULL );");
 
 	// ID 0 = total queries
-	db_set_counter(db, DB_TOTALQUERIES, 0);
+	if(!db_set_counter(db, DB_TOTALQUERIES, 0))
+	{
+		logg("create_counter_table(): Failed to set total queries counter to zero!");
+		return false;
+	}
 
 	// ID 1 = total blocked queries
-	db_set_counter(db, DB_BLOCKEDQUERIES, 0);
+	if(!db_set_counter(db, DB_BLOCKEDQUERIES, 0))
+	{
+		logg("create_counter_table(): Failed to set blocked queries counter to zero!");
+		return false;
+	}
 
 	// Time stamp of creation of the counters database
-	db_set_FTL_property(db, DB_FIRSTCOUNTERTIMESTAMP, (unsigned long)time(0));
+	if(!db_set_FTL_property(db, DB_FIRSTCOUNTERTIMESTAMP, (unsigned long)time(0)))
+	{
+		logg("create_counter_table(): Failed to update first counter timestamp!");
+		return false;
+	}
 
 	// Update database version to 2
-	db_set_FTL_property(db, DB_VERSION, 2);
+	if(!db_set_FTL_property(db, DB_VERSION, 2))
+	{
+		logg("create_counter_table(): Failed to update database version!");
+		return false;
+	}
 
 	return true;
 }
@@ -212,11 +227,6 @@ static bool db_create(void)
 	// Close database handle
 	dbclose(&db);
 
-	// Explicitly set permissions to 0644
-	// 644 =            u+w       u+r       g+r       o+r
-	const mode_t mode = S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH;
-	chmod_file(FTLfiles.FTL_db, mode);
-
 	return true;
 }
 
@@ -231,21 +241,10 @@ void SQLite3LogCallback(void *pArg, int iErrCode, const char *zMsg)
 void db_init(void)
 {
 	// Initialize SQLite3 logging callback
-	// This ensures SQLite3 errors and warnings are logged to pihole-FTL.log
+	// This ensures SQLite3 errors and warnings are logged to FTL.log
 	// We use this to possibly catch even more errors in places we do not
 	// explicitly check for failures to have happened
 	sqlite3_config(SQLITE_CONFIG_LOG, SQLite3LogCallback, NULL);
-
-	// SQLITE_DBCONFIG_DEFENSIVE
-	// Disbale language features that allow ordinary SQL to deliberately corrupt
-	// the database file. The disabled features include but are not limited to
-	// the following:
-	//
-	// - The PRAGMA writable_schema=ON statement.
-	// - The PRAGMA journal_mode=OFF statement.
-	// - Writes to the sqlite_dbpage virtual table.
-	// - Direct writes to shadow tables.
-	sqlite3_config(SQLITE_DBCONFIG_DEFENSIVE, true);
 
 	// Register Pi-hole provided SQLite3 extensions (see sqlite3-ext.c)
 	sqlite3_auto_extension((void (*)(void))sqlite3_pihole_extensions_init);
@@ -260,6 +259,11 @@ void db_init(void)
 			return;
 		}
 	}
+
+	// Explicitly set permissions to 0664
+	// 664 =            u+w       u+r       g+w       g+r       o+r
+	const mode_t mode = S_IWUSR | S_IRUSR | S_IWGRP | S_IRGRP | S_IROTH;
+	chmod_file(FTLfiles.FTL_db, mode);
 
 	// Open database
 	sqlite3 *db = dbopen(false);
@@ -404,6 +408,63 @@ void db_init(void)
 		dbversion = db_get_int(db, DB_VERSION);
 	}
 
+	// Update to version 10 if lower
+	if(dbversion < 10)
+	{
+		// Update to version 10: Use linking tables for queries table
+		logg("Updating long-term database to version 10");
+		if(!optimize_queries_table(db))
+		{
+			logg("Queries table not optimized, database not available");
+			dbclose(&db);
+			return;
+		}
+
+		// Reopen database after low-level schema editing to reload the schema
+		dbclose(&db);
+		if(!(db = dbopen(false)))
+			return;
+
+		// Get updated version
+		dbversion = db_get_int(db, DB_VERSION);
+	}
+
+	// Update to version 11 if lower
+	if(dbversion < 11)
+	{
+		// Update to version 11: Use link table also for additional_info column
+		logg("Updating long-term database to version 11");
+		if(!create_addinfo_table(db))
+		{
+			logg("Linkt table for additional_info not generated, database not available");
+			dbclose(&db);
+			return;
+		}
+
+		// Reopen database after low-level schema editing to reload the schema
+		dbclose(&db);
+		if(!(db = dbopen(false)))
+			return;
+
+		// Get updated version
+		dbversion = db_get_int(db, DB_VERSION);
+	}
+
+	// Update to version 12 if lower
+	if(dbversion < 12)
+	{
+		// Update to version 12: Add additional columns for reply type and time, and dnssec status
+		logg("Updating long-term database to version 12");
+		if(!add_query_storage_columns(db))
+		{
+			logg("Additional records not generated, database not available");
+			dbclose(&db);
+			return;
+		}
+		// Get updated version
+		dbversion = db_get_int(db, DB_VERSION);
+	}
+
 	lock_shm();
 	import_aliasclients(db);
 	unlock_shm();
@@ -453,7 +514,6 @@ bool db_set_counter(sqlite3 *db, const enum counters_table_props ID, const long 
 	if(rc != SQLITE_OK)
 	{
 		checkFTLDBrc(rc);
-		dbclose(&db);
 		return false;
 	}
 
@@ -466,7 +526,6 @@ bool db_update_counters(sqlite3 *db, const int total, const int blocked)
 	if(rc != SQLITE_OK)
 	{
 		checkFTLDBrc(rc);
-		dbclose(&db);
 		return false;
 	}
 
@@ -474,7 +533,6 @@ bool db_update_counters(sqlite3 *db, const int total, const int blocked)
 	if(rc != SQLITE_OK)
 	{
 		checkFTLDBrc(rc);
-		dbclose(&db);
 		return false;
 	}
 
@@ -547,7 +605,6 @@ long int get_max_query_ID(sqlite3 *db)
 		{
 			logg("Encountered prepare error in get_max_query_ID(): %s", sqlite3_errstr(rc));
 			checkFTLDBrc(rc);
-			dbclose(&db);
 		}
 
 		// Return okay if the database is busy
@@ -559,7 +616,6 @@ long int get_max_query_ID(sqlite3 *db)
 	{
 		logg("Encountered step error in get_max_query_ID(): %s", sqlite3_errstr(rc));
 		checkFTLDBrc(rc);
-		dbclose(&db);
 		return DB_FAILED;
 	}
 

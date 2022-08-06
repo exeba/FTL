@@ -43,11 +43,6 @@ static inline bool strEndsWith(const char *input, const char *end){
 	return strcmp(input + strlen(input) - strlen(end), end) == 0;
 }
 
-static void print_FTL_version(void)
-{
-	printf("Pi-hole FTL %s %s\n", get_FTL_version(), GIT_DATE);
-}
-
 void parse_args(int argc, char* argv[])
 {
 	bool quiet = false;
@@ -81,11 +76,7 @@ void parse_args(int argc, char* argv[])
 	// Also, we do this if the first argument is a file with ".db" ending
 	if(strEndsWith(argv[0], "sqlite3") ||
 	   (argc > 1 && strEndsWith(argv[1], ".db")))
-	{
-		if(argc == 1) // No arguments after this one
-			print_FTL_version();
-		exit(sqlite3_shell_main(argc, argv));
-	}
+			exit(sqlite3_shell_main(argc, argv));
 
 	// start from 1, as argv[0] is the executable name
 	for(int i = 1; i < argc; i++)
@@ -111,9 +102,24 @@ void parse_args(int argc, char* argv[])
 		   strcmp(argv[i], "sqlite3") == 0 ||
 		   strcmp(argv[i], "--sqlite3") == 0)
 		{
-			if(argc == i+1) // No arguments after this one
-				print_FTL_version();
-			exit(sqlite3_shell_main(argc - i, &argv[i]));
+			// Human-readable table output mode
+			if(i+1 < argc && strcmp(argv[i+1], "-h") == 0)
+			{
+				int argc2 = argc - i + 5 - 2;
+				char **argv2 = calloc(argc2, sizeof(char*));
+				argv2[0] = argv[0]; // Application name
+				argv2[1] = (char*)"-column";
+				argv2[2] = (char*)"-header";
+				argv2[3] = (char*)"-nullvalue";
+				argv2[4] = (char*)"(null)";
+				// i = "sqlite3"
+				// i+1 = "-h"
+				for(int j = 0; j < argc - i - 2; j++)
+					argv2[5 + j] = argv[i + 2 + j];
+				exit(sqlite3_shell_main(argc2, argv2));
+			}
+			else
+				exit(sqlite3_shell_main(argc - i, &argv[i]));
 		}
 
 		// Implement dnsmasq's test function, no need to prepare the entire FTL
@@ -235,7 +241,11 @@ void parse_args(int argc, char* argv[])
 		{
 			// Print FTL version
 			printf("****************************** FTL **********************************\n");
-			printf("Version:         %s\n\n", get_FTL_version());
+			printf("Version:         %s\n", get_FTL_version());
+			printf("Branch:          %s\n", GIT_BRANCH);
+			printf("Commit:          %s (%s)\n", GIT_HASH, GIT_DATE);
+			printf("Architecture:    %s\n", FTL_ARCH);
+			printf("Compiler:        %s\n\n", FTL_CC);
 
 			// Print dnsmasq version and compile time options
 			print_dnsmasq_version();
@@ -339,7 +349,8 @@ void parse_args(int argc, char* argv[])
 			printf("\t--luac, luac        FTL's lua compiler\n");
 			printf("\tdhcp-discover       Discover DHCP servers in the local\n");
 			printf("\t                    network\n");
-			printf("\tsqlite3             FTL's SQLite3 shell\n");
+			printf("\tsql, sqlite3        FTL's SQLite3 shell\n");
+			printf("\tsql -h, sqlite3 -h  FTL's SQLite3 shell (human-readable mode)\n");
 			printf("\n\nOnline help: https://github.com/pi-hole/FTL\n");
 			exit(EXIT_SUCCESS);
 		}
@@ -349,6 +360,12 @@ void parse_args(int argc, char* argv[])
 		{
 			printf("True\n");
 			exit(EXIT_SUCCESS);
+		}
+
+		// Return number of errors on this undocumented flag
+		if(strcmp(argv[i], "--check-structs") == 0)
+		{
+			exit(check_struct_sizes());
 		}
 
 		// Complain if invalid options have been found

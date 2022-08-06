@@ -15,8 +15,9 @@
 
 // enum privacy_level
 #include "enums.h"
-// assert_sizeof
-#include "static_assert.h"
+
+// Definitions like OVERTIME_SLOT
+#include "FTL.h"
 
 extern const char *querytypes[TYPE_MAX];
 
@@ -40,18 +41,16 @@ typedef struct {
 	// and straddle the individual bytes. It is useful to pack the memory as
 	// tightly as possible as there may be dozens of thousands of these
 	// objects in memory (one per query).
-	// C99 guarentees that bit-fields will be packed as tightly as possible,
-	// provided they don’t cross storageau unit boundaries (6.7.2.1 #10).
+	// C99 guarantees that bit-fields will be packed as tightly as possible,
+	// provided they don't cross storage unit boundaries (6.7.2.1 #10).
 	struct query_flags {
 		bool whitelisted :1;
 		bool complete :1;
 		bool blocked :1;
 		bool database :1;
+		bool response_calculated :1;
 	} flags;
 } queriesData;
-
-// ARM needs extra padding at the end
-ASSERT_SIZEOF(queriesData, 56, 44, 44);
 
 typedef struct {
 	unsigned char magic;
@@ -63,7 +62,6 @@ typedef struct {
 	size_t namepos;
 	time_t lastQuery;
 } upstreamsData;
-ASSERT_SIZEOF(upstreamsData, 640, 624, 624);
 
 typedef struct {
 	unsigned char magic;
@@ -74,6 +72,7 @@ typedef struct {
 		bool new:1;
 		bool found_group:1;
 		bool aliasclient:1;
+		bool rate_limited:1;
 	} flags;
 	int count;
 	int blockedcount;
@@ -89,15 +88,14 @@ typedef struct {
 	time_t lastQuery;
 	time_t firstSeen;
 } clientsData;
-ASSERT_SIZEOF(clientsData, 696, 668, 668);
 
 typedef struct {
 	unsigned char magic;
 	int count;
 	int blockedcount;
+	uint32_t domainhash;
 	size_t domainpos;
 } domainsData;
-ASSERT_SIZEOF(domainsData, 24, 16, 16);
 
 typedef struct {
 	unsigned char magic;
@@ -108,9 +106,9 @@ typedef struct {
 	int clientID;
 	int black_regex_idx;
 } DNSCacheData;
-ASSERT_SIZEOF(DNSCacheData, 16, 16, 16);
 
 void strtolower(char *str);
+uint32_t hashStr(const char *s) __attribute__((const));
 int findQueryID(const int id);
 int findUpstreamID(const char * upstream, const in_port_t port);
 int findDomainID(const char *domain, const bool count);

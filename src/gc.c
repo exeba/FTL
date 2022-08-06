@@ -20,23 +20,91 @@
 #include "signals.h"
 // data getter functions
 #include "datastructure.h"
+// logg_rate_limit_message()
+#include "database/message-table.h"
+// get_nprocs()
+#include <sys/sysinfo.h>
+// get_filepath_usage()
+#include "files.h"
+
+// Resource checking interval
+// default: 300 seconds
+#define RCinterval 300
 
 bool doGC = false;
 
+// Subtract rate-limitation count from individual client counters
+// As long as client->rate_limit is still larger than the allowed
+// maximum count, the rate-limitation will just continue
 static void reset_rate_limiting(void)
 {
 	for(int clientID = 0; clientID < counters->clients; clientID++)
 	{
 		clientsData *client = getClient(clientID, true);
-		if(client != NULL)
-			client->rate_limit = 0;
+		if(!client)
+			continue;
+
+		// Check if we are currently rate-limiting this client
+		if(client->flags.rate_limited)
+		{
+			const char *clientIP = getstr(client->ippos);
+
+			// Check if we want to continue rate limiting
+			if(client->rate_limit > config.rate_limit.count)
+			{
+				logg("Still rate-limiting %s as it made additional %d queries", clientIP, client->rate_limit);
+			}
+			// or if rate-limiting ends for this client now
+			else
+			{
+				logg("Ending rate-limitation of %s", clientIP);
+				client->flags.rate_limited = false;
+			}
+		}
+
+		// Reset counter
+		client->rate_limit = 0;
 	}
 }
 
 static time_t lastRateLimitCleaner = 0;
-time_t get_rate_limit_turnaround(void)
+// Returns how many more seconds until the current rate-limiting interval is over
+time_t get_rate_limit_turnaround(const unsigned int rate_limit_count)
 {
-	return time(NULL) - lastRateLimitCleaner + config.rate_limit.interval;
+	const unsigned int how_often = rate_limit_count/config.rate_limit.count;
+	return (time_t)config.rate_limit.interval*how_often - (time(NULL) - lastRateLimitCleaner);
+}
+
+static void check_space(const char *file)
+{
+	if(config.check.disk == 0)
+		return;
+
+	int perc = 0;
+	char buffer[64] = { 0 };
+	// Warn if space usage at the device holding the corresponding file
+	// exceeds the configured threshold
+	if((perc = get_filepath_usage(file, buffer)) > config.check.disk)
+		log_resource_shortage(-1.0, 0, -1, perc, file, buffer);
+}
+
+static void check_load(void)
+{
+	if(!config.check.load)
+		return;
+
+	// Get CPU load averages
+	double load[3];
+	if (getloadavg(load, 3) == -1)
+		return;
+
+	// Get number of CPU cores
+	const int nprocs = get_nprocs();
+
+	// Warn if 15 minute average of load exceeds number of available
+	// processors
+	if(load[2] > nprocs)
+		log_resource_shortage(load[2], nprocs, -1, -1, NULL, NULL);
 }
 
 void *GC_thread(void *val)
@@ -48,6 +116,7 @@ void *GC_thread(void *val)
 	// Remember when we last ran the actions
 	time_t lastGCrun = time(NULL) - time(NULL)%GCinterval;
 	lastRateLimitCleaner = time(NULL);
+	time_t lastResourceCheck = 0;
 
 	// Run as long as this thread is not canceled
 	while(!killed)
@@ -65,6 +134,15 @@ void *GC_thread(void *val)
 		if(killed)
 			break;
 
+		// Check available resources
+		if(now - lastResourceCheck >= RCinterval)
+		{
+			check_load();
+			check_space(FTLfiles.FTL_db);
+			check_space(FTLfiles.log);
+			lastResourceCheck = now;
+		}
+
 		if(now - GCdelay - lastGCrun >= GCinterval || doGC)
 		{
 			doGC = false;
@@ -78,10 +156,9 @@ void *GC_thread(void *val)
 			// Get minimum timestamp to keep (this can be set with MAXLOGAGE)
 			time_t mintime = (now - GCdelay) - config.maxlogage;
 
-			// Align to the start of the next hour. This will also align with
-			// the oldest overTime interval after GC is done.
-			mintime -= mintime % 3600;
-			mintime += 3600;
+			// Align the start time of this GC run to the GCinterval. This will also align with the
+			// oldest overTime interval after GC is done.
+			mintime -= mintime % GCinterval;
 
 			if(config.debug & DEBUG_GC)
 			{
@@ -142,6 +219,7 @@ void *GC_thread(void *val)
 					case QUERY_REGEX_CNAME: // Regex blacklisted domain in CNAME chain (fall through)
 					case QUERY_BLACKLIST_CNAME: // Exactly blacklisted domain in CNAME chain (fall through)
 					case QUERY_DBBUSY: // Blocked because gravity database was busy
+					case QUERY_SPECIAL_DOMAIN: // Blocked by special domain handling
 						if(domain != NULL)
 							domain->blockedcount--;
 						if(client != NULL)
@@ -181,7 +259,10 @@ void *GC_thread(void *val)
 				// Example: (I = now invalid, X = still valid queries, F = free space)
 				//   Before: IIIIIIXXXXFF
 				//   After:  XXXXFFFFFFFF
-				memmove(getQuery(0, true), getQuery(removed, true), (counters->queries - removed)*sizeof(queriesData));
+				queriesData *dest = getQuery(0, true);
+				queriesData *src = getQuery(removed, true);
+				if(dest && src)
+					memmove(dest, src, (counters->queries - removed)*sizeof(queriesData));
 
 				// Update queries counter
 				counters->queries -= removed;
@@ -189,7 +270,9 @@ void *GC_thread(void *val)
 				lastdbindex -= removed;
 
 				// ensure remaining memory is zeroed out (marked as "F" in the above example)
-				memset(getQuery(counters->queries, true), 0, (counters->queries_MAX - counters->queries)*sizeof(queriesData));
+				queriesData *tail = getQuery(counters->queries, true);
+				if(tail)
+					memset(tail, 0, (counters->queries_MAX - counters->queries)*sizeof(queriesData));
 			}
 
 			// Determine if overTime memory needs to get moved
