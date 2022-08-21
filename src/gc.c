@@ -22,8 +22,8 @@
 #include "datastructure.h"
 // logg_rate_limit_message()
 #include "database/message-table.h"
-// get_nprocs()
-#include <sys/sysinfo.h>
+// sysctl()
+#include <sys/sysctl.h>
 // get_filepath_usage()
 #include "files.h"
 
@@ -99,7 +99,12 @@ static void check_load(void)
 		return;
 
 	// Get number of CPU cores
-	const int nprocs = get_nprocs();
+	int mib[2], nprocs;
+	size_t len;
+	mib[0] = CTL_HW;
+	mib[1] = HW_NCPU;
+	len = sizeof(nprocs);
+	sysctl(mib, 2, &nprocs, &len, NULL, 0);
 
 	// Warn if 15 minute average of load exceeds number of available
 	// processors

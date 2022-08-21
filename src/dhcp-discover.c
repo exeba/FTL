@@ -72,7 +72,8 @@ static int create_dhcp_socket(const char *iname)
 	int flag=1;
 
 	// Set up the address we're going to bind to (we will listen on any address).
-	memset(&interface, 0, sizeof(interface));
+	// FIXME: find SO_BINDTODEVICE alternative
+	// memset(&interface, 0, sizeof(interface));
 	memset(&dhcp_socket, 0, sizeof(dhcp_socket));
 	dhcp_socket.sin_family = AF_INET;
 	dhcp_socket.sin_port = htons(DHCP_CLIENT_PORT);

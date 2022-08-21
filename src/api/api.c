@@ -40,8 +40,11 @@
 #include "../database/aliasclients.h"
 // get_edestr()
 #include "api_helper.h"
-// RTF_UP, RTF_GATEWAY
-#include <linux/route.h>
+// RTF_UP, RTF_GATEWAY, RTM_* RTAX_*
+#include <net/route.h>
+// sockaddr_dl
+#include <net/if_dl.h>
+
 
 // defined in src/dnsmasq/cache.c
 extern char *querystr(char *desc, unsigned short type);
@@ -1458,52 +1461,107 @@ void getMAXLOGAGE(const int *sock)
 	ssend(*sock, "%d\n", config.maxlogage);
 }
 
+
+static volatile sig_atomic_t stop_read;
+
+static void
+stopit(int sig __unused)
+{
+    stop_read = 1;
+}
+
 static bool getDefaultInterface(char iface[IF_NAMESIZE], in_addr_t *gw)
 {
-	// Get IPv4 default route gateway and associated interface
-	long dest_r = 0, gw_r = 0;
-	int flags = 0, metric = 0, minmetric = __INT_MAX__;
-	char iface_r[IF_NAMESIZE] = { 0 };
-	char buf[1024] = { 0 };
+    int  sock;
+    if((sock = socket(PF_ROUTE, SOCK_RAW, 0)))
+    {
+        struct {
+            struct  rt_msghdr m_rtm;
+            char    m_space[512];
+        } m_rtmsg;
+        memset(&m_rtmsg, 0, sizeof(m_rtmsg));
 
-	FILE *file;
-	if((file = fopen("/proc/net/route", "r")))
-	{
-		// Parse /proc/net/route - the kernel's IPv4 routing table
-		while(fgets(buf, sizeof(buf), file))
-		{
-			if(sscanf(buf, "%s %lx %lx %x %*i %*i %i", iface_r, &dest_r, &gw_r, &flags, &metric) != 5)
-				continue;
+        int  rtm_seq=0;
+        struct sockaddr_in inet4default;
+        inet4default.sin_family = AF_INET;
+        inet4default.sin_addr.s_addr = INADDR_ANY;
 
-			// Only anaylze routes which are UP and whose
-			// destinations are a gateway
-			if(!(flags & RTF_UP) || !(flags & RTF_GATEWAY))
-				continue;
+        m_rtmsg.m_rtm.rtm_type = RTM_GET;
+        m_rtmsg.m_rtm.rtm_flags = RTF_UP;
+        m_rtmsg.m_rtm.rtm_version = RTM_VERSION;
+        m_rtmsg.m_rtm.rtm_seq = ++rtm_seq;
+        m_rtmsg.m_rtm.rtm_addrs = (RTA_IFP | RTA_DST) ;
+        memmove(m_rtmsg.m_space, (char *)&inet4default, SA_SIZE(&inet4default));
+        m_rtmsg.m_rtm.rtm_msglen = m_rtmsg.m_space - (char *)&m_rtmsg + SA_SIZE(&inet4default);
 
-			// Only analyze "catch all" routes (destination 0.0.0.0)
-			if(dest_r != 0)
-				continue;
+        int rlen;
+        if ((rlen = write(sock, (char *)&m_rtmsg, m_rtmsg.m_rtm.rtm_msglen)) < 0) {
+            logg("Cannot query PF_ROUTE socket: %s", strerror(errno));
+            return false;
+        }
 
-			// Store default gateway, overwrite if we find a route with
-			// a lower metric
-			if(metric < minmetric)
-			{
-				minmetric = metric;
-				*gw = gw_r;
-				strcpy(iface, iface_r);
+        struct sigaction old_sa;
+        struct sigaction sa;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sa.sa_handler = stopit;
+        if (sigaction(SIGALRM, &sa, &old_sa) == -1)
+            logg("Unable to set SIGALRM handler");
 
-				if(config.debug & DEBUG_API)
-					logg("Reading interfaces: flags: %i, addr: %s, iface: %s, metric: %i, minmetric: %i",
-					     flags, inet_ntoa(*(struct in_addr *) gw), iface, metric, minmetric);
-			}
-		}
-		fclose(file);
-	}
-	else
-		logg("Cannot read /proc/net/route: %s", strerror(errno));
+        int l;
+        int  pid = getpid();
+        stop_read = 0;
+        alarm(2);
+        do {
+            l = read(sock, (char *)&m_rtmsg, sizeof(m_rtmsg));
+        } while (l > 0 && stop_read == 0 &&
+            (m_rtmsg.m_rtm.rtm_type != RTM_GET || m_rtmsg.m_rtm.rtm_seq != rtm_seq ||
+            m_rtmsg.m_rtm.rtm_pid != pid));
 
-	// Return success based on having found the default gateway's address
-	return gw != 0;
+        if (sigaction(SIGALRM, &old_sa, 0) == -1)
+            logg("Unable to resore old SIGALRM handler");
+
+        if (stop_read != 0) {
+            logg("read from routing socket timed out");
+            return false;
+        } else {
+            alarm(0);
+        }
+
+        if (m_rtmsg.m_rtm.rtm_version != RTM_VERSION) {
+            logg("routing message version %d not understood",
+                 m_rtmsg.m_rtm.rtm_version);
+            return false;
+        }
+        if (m_rtmsg.m_rtm.rtm_msglen > l) {
+            logg("message length mismatch, in packet %d, returned %d",
+                  m_rtmsg.m_rtm.rtm_msglen, l);
+            return false;
+        }
+        if (m_rtmsg.m_rtm.rtm_errno)  {
+            errno = m_rtmsg.m_rtm.rtm_errno;
+            logg("message indicates error %d", errno);
+            return false;
+        }
+
+        struct sockaddr *sp[RTAX_MAX];
+        memset(sp, 0, sizeof(sp));
+        char *cp = ((char *)(&m_rtmsg.m_rtm + 1));
+        for (size_t i = 0; i < RTAX_MAX; i++) {
+            if (m_rtmsg.m_rtm.rtm_addrs & (1 << i)) {
+                sp[i] = (struct sockaddr *)cp;
+                cp += SA_SIZE((struct sockaddr *)cp);
+            }
+        }
+
+        *gw = ((struct sockaddr_in *)(void *)sp[RTAX_GATEWAY])->sin_addr.s_addr;
+        strcpy(iface, ((struct sockaddr_dl *)(void *)sp[RTAX_IFP])->sdl_data);
+    }
+    else
+        logg("Cannot read PF_ROUTE socket: %s", strerror(errno));
+
+    // Return success based on having found the default gateway's address
+    return gw != 0;
 }
 
 void getGateway(const int *sock)
@@ -1559,7 +1617,7 @@ static bool listInterfaces(struct if_info **head, char default_iface[IF_NAMESIZE
 	while ((dp = readdir(dfd)) != NULL)
 	{
 		// Skip "." and ".."
-		if(!dp->d_name || strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
+		if(strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
 			continue;
 
 		// Create new interface record

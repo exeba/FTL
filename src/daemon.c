@@ -193,7 +193,7 @@ void delay_startup(void)
 
 	// Get uptime of system
 	struct timespec time_spec;
-	if (clock_gettime(GETTIME_OPTION, &time_spec) == 0)
+	if (clock_gettime(CLOCK_UPTIME_PRECISE, &time_spec) == 0)
 	{
 		if(time_spec.tv_sec > DELAY_UPTIME)
 		{
