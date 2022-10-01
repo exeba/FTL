@@ -36,7 +36,7 @@ fi
 #     ./build.sh "-DA=1 -DB=2" install
 mkdir -p cmake
 cd cmake
-if [[ "${1}" == "-D"* ]]; then
+if [ "${1}" = "-D${1#-D}" ]; then
     cmake "${1}" ..
 else
     cmake ..
@@ -62,7 +62,7 @@ else
     cp pihole-FTL ../
 fi
 
-if [[ -n "${test}" ]]; then
+if [ -n "${test}" ]; then
     cd ..
     ./test/run.sh
 fi
