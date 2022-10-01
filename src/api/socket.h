@@ -24,7 +24,7 @@ void saveport(int port);
 void close_unix_socket(bool unlink_file);
 void seom(const int sock, const bool istelnet);
 #define ssend(sock, format, ...) _ssend(sock, __FILE__, __FUNCTION__,  __LINE__, format, ##__VA_ARGS__)
-bool _ssend(const int sock, const char *file, const char *func, const int line, const char *format, ...) __attribute__ ((format (gnu_printf, 5, 6)));
+bool _ssend(const int sock, const char *file, const char *func, const int line, const char *format, ...) __printflike(5, 6);
 void listen_telnet(const enum telnet_type type);
 
 #endif //SOCKET_H
