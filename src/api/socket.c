@@ -157,7 +157,7 @@ static void *telnet_connection_handler_thread(void *args)
 	// Set thread name
 	char threadname[16] = { 0 };
 	snprintf(threadname, sizeof(threadname), "telnet-%s-%i", tinfo->stype, tinfo->tid);
-	prctl(PR_SET_NAME, threadname, 0, 0, 0);
+	set_thread_name(threadname);
 
 	// Ensure this thread can be canceled at any time (not only at
 	// cancellation points)
