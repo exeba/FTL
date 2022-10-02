@@ -64,8 +64,8 @@ static int bind_to_telnet_socket(const enum telnet_type type, const char *stype)
 		return -1;
 	}
 
-	const size_t addrlen = MAX(sizeof(struct sockaddr_un), MAX(sizeof(struct sockaddr_in), sizeof(struct sockaddr_in6)));
-	void *address = calloc(1, addrlen);
+	size_t addrlen = 0;
+	void *address = NULL;
 
 	if(type == TELNETv4 || type == TELNETv6)
 	{
@@ -81,6 +81,9 @@ static int bind_to_telnet_socket(const enum telnet_type type, const char *stype)
 
 		if(type == TELNETv6)
 		{
+		        addrlen = sizeof(struct sockaddr_in6);
+			address = calloc(1, addrlen);
+
 			// If this flag is set to true (nonzero), then the  socket  is  re‐
 			// stricted  to  sending  and receiving IPv6 packets only.  In this
 			// case, an IPv4 and an IPv6 application can bind to a single  port
@@ -106,6 +109,8 @@ static int bind_to_telnet_socket(const enum telnet_type type, const char *stype)
 		}
 		else // IPv4
 		{
+        		addrlen = sizeof(struct sockaddr_in);
+			address = calloc(1, addrlen);
 
 			if(config.socket_listenlocal)
 				((struct sockaddr_in*) address)->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -119,6 +124,9 @@ static int bind_to_telnet_socket(const enum telnet_type type, const char *stype)
 	}
 	else // socket
 	{
+		addrlen = sizeof(struct sockaddr_un);
+		address = calloc(1, addrlen);
+
 		// Make sure unix socket file handle does not exist, if it exists, remove it
 		unlink(FTLfiles.socketfile);
 
