@@ -1474,6 +1474,7 @@ static bool getDefaultInterface(char iface[IF_NAMESIZE], in_addr_t *gw)
 
         int  rtm_seq=0;
         struct sockaddr_in inet4default;
+        inet4default.sin_len = sizeof(struct sockaddr_in);
         inet4default.sin_family = AF_INET;
         inet4default.sin_addr.s_addr = INADDR_ANY;
 
