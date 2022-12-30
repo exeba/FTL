@@ -60,7 +60,7 @@ extern countersStruct *counters;
 /// \param size the size to allocate
 /// \return a structure with a pointer to the mounted shared memory. The pointer
 /// will always be valid, because if it failed FTL will have exited.
-static SharedMemory create_shm(const char *name, const size_t size);
+static SharedMemory create_shm(const char *name, const size_t size, bool create_new);
 
 /// Reallocate shared memory
 ///

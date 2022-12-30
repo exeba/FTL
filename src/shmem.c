@@ -621,6 +621,7 @@ void destroy_shmem(void)
 ///
 /// \param name the name of the shared memory
 /// \param size the size to allocate
+/// \param create_new true = delete old file, create new, false = connect to existing object or fail
 /// \return a structure with a pointer to the mounted shared memory. The pointer
 /// will always be valid, because if it failed FTL will have exited.
 static SharedMemory create_shm(const char *name, const size_t size, bool create_new)
