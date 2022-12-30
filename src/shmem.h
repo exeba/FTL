@@ -100,6 +100,7 @@ void _unlock_log(const char* func, const int line, const char * file);
 /// Block until a lock can be obtained
 
 bool init_shmem(void);
+bool open_shmem(void);
 void destroy_shmem(void);
 size_t addstr(const char *str);
 #define getstr(pos) _getstr(pos, __FUNCTION__, __LINE__, __FILE__)
