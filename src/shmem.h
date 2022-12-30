@@ -99,7 +99,6 @@ void _unlock_log(const char* func, const int line, const char * file);
 
 /// Block until a lock can be obtained
 
-static bool _init_shmem(bool create_new);
 bool init_shmem(void);
 bool open_shmem(void);
 void destroy_shmem(void);
