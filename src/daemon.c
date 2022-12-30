@@ -18,8 +18,6 @@
 #endif
 // sleepms()
 #include "timers.h"
-// saveport()
-#include "api/socket.h"
 // gravityDB_close()
 #include "database/gravity-db.h"
 // destroy_shmem()
@@ -196,7 +194,12 @@ void delay_startup(void)
 
 	// Sleep if requested by DELAY_STARTUP
 	logg("Sleeping for %d seconds as requested by configuration ...", config.delay_startup);
-	sleep(config.delay_startup);
+	if(sleep(config.delay_startup) != 0)
+	{
+		logg("FATAL: Sleeping was interrupted by an external signal");
+		cleanup(EXIT_FAILURE);
+		exit(EXIT_FAILURE);
+	}
 	logg("Done sleeping, continuing startup of resolver...");
 }
 
@@ -291,9 +294,6 @@ void cleanup(const int ret)
 		gravityDB_close();
 		unlock_shm();
 	}
-
-	// Empty API port file, port 0 = truncate file
-	saveport(0);
 
 	// Remove PID file
 	removepid();
