@@ -22,8 +22,8 @@
 #include <grp.h>
 // NAME_MAX
 #include <limits.h>
-// statvfs()
-#include <sys/statvfs.h>
+// statfs()
+#include <sys/mount.h>
 // dirname()
 #include <libgen.h>
 
@@ -154,8 +154,8 @@ void ls_dir(const char* path)
 int get_path_usage(const char *path, char buffer[64])
 {
 	// Get filesystem information about /dev/shm (typically a tmpfs)
-	struct statvfs f;
-	if(statvfs(path, &f) != 0)
+	struct statfs f;
+	if(statfs(path, &f) != 0)
 	{
 		// If statvfs() failed, we return the error instead
 		strncpy(buffer, strerror(errno), 64);
@@ -165,7 +165,7 @@ int get_path_usage(const char *path, char buffer[64])
 
 	// Explicitly cast the block counts to unsigned long long to avoid
 	// overflowing with drives larger than 4 GB on 32bit systems
-	const unsigned long long size = (unsigned long long)f.f_blocks * f.f_frsize;
+	const unsigned long long size = (unsigned long long)f.f_blocks * f.f_bsize;
 	const unsigned long long free = (unsigned long long)f.f_bavail * f.f_bsize;
 	const unsigned long long used = size - free;
 
