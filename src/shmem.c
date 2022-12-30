@@ -586,12 +586,12 @@ bool _init_shmem(bool create_new)
 
 bool init_shmem()
 {
-	return _init_shmem(true)
+	return _init_shmem(true);
 }
 
 bool open_shmem()
 {
-	return _init_shmem(false)
+	return _init_shmem(false);
 }
 
 // CHOWN all shared memory objects to supplied user/group
