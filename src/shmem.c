@@ -465,7 +465,7 @@ bool is_our_lock(void)
 	return false;
 }
 
-bool _init_shmem(bool create_new)
+static bool _init_shmem(bool create_new)
 {
 	// Get kernel's page size
 	pagesize = getpagesize();
