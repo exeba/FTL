@@ -308,7 +308,7 @@ void parse_args(int argc, char* argv[])
 
 		if(strcmp(argv[i], "--shm-cleanup") == 0)
 		{
-			init_shmem(false);
+			open_shmem();
 			destroy_shmem();
 			exit(EXIT_SUCCESS);
 		}
@@ -506,7 +506,7 @@ void parse_args(int argc, char* argv[])
 			printf("\t%sd%s, %sdebug%s            Enter debugging mode\n", green, normal, green, normal);
 			printf("\t%stest%s                Don't start pihole-FTL but\n", green, normal);
 			printf("\t                    instead quit immediately\n");
-			printf("\t%s--shm-cleanup%s       Close all shm handles and exit\n");
+			printf("\t%s--shm-cleanup%s       Close all shm handles and exit\n", green, normal);
 			printf("\t%s-f%s, %sno-daemon%s       Don't go into daemon mode\n\n", green, normal, green, normal);
 
 			printf("%sOther:%s\n", yellow, normal);

@@ -351,10 +351,6 @@ void read_FTLconf(void)
 	// PIDFILE
 	getpath(fp, "PIDFILE", "/var/run/pihole-FTL.pid", &FTLfiles.pid);
 
-	// PORTFILE
-	getpath(fp, "PORTFILE", "/var/run/pihole-FTL.port", &FTLfiles.port);
-	saveport(config.port);
-
 	// SOCKETFILE
 	getpath(fp, "SOCKETFILE", "/var/run/pihole/FTL.sock", &FTLfiles.socketfile);
 
