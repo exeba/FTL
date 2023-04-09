@@ -58,7 +58,7 @@
 @test "Number of compiled regex filters as expected" {
   run bash -c 'grep "Compiled [0-9]* whitelist" /var/log/pihole/FTL.log'
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[0]} == *"Compiled 2 whitelist and 9 blacklist regex filters"* ]]
+  [[ ${lines[0]} == *"Compiled 2 whitelist and 11 blacklist regex filters"* ]]
 }
 
 @test "Blacklisted domain is blocked" {
@@ -196,7 +196,7 @@
   [[ ${lines[0]} == "2" ]]
   run bash -c "grep -c 'Regex blacklist ([[:digit:]]*, DB ID [[:digit:]]*) .* NOT ENABLED for client 127.0.0.4' /var/log/pihole/FTL.log"
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[0]} == "9" ]]
+  [[ ${lines[0]} == "11" ]]
 }
 
 @test "Client 5: Client is recognized by MAC address" {
@@ -228,7 +228,7 @@
   [[ ${lines[0]} == "2" ]]
   run bash -c "grep -c 'Regex blacklist ([[:digit:]]*, DB ID [[:digit:]]*) .* NOT ENABLED for client 127.0.0.5' /var/log/pihole/FTL.log"
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[0]} == "9" ]]
+  [[ ${lines[0]} == "11" ]]
 }
 
 @test "Client 6: Client is recognized by interface name" {
@@ -266,7 +266,7 @@
   [[ ${lines[0]} == "2" ]]
   run bash -c "grep -c 'Regex blacklist ([[:digit:]]*, DB ID [[:digit:]]*) .* NOT ENABLED for client 127.0.0.6' /var/log/pihole/FTL.log"
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[0]} == "9" ]]
+  [[ ${lines[0]} == "11" ]]
 }
 
 @test "Normal query (A) is not blocked" {
@@ -426,14 +426,25 @@
   [[ ${lines[@]} == *"status: SERVFAIL"* ]]
 }
 
+@test "ABP-style matching working as expected" {
+  run bash -c "dig A special.gravity.ftl @127.0.0.1 +short"
+  printf "%s\n" "${lines[@]}"
+  [[ ${lines[0]} == "0.0.0.0" ]]
+  [[ ${lines[1]} == "" ]]
+  run bash -c "dig A a.b.c.d.special.gravity.ftl @127.0.0.1 +short"
+  printf "%s\n" "${lines[@]}"
+  [[ ${lines[0]} == "0.0.0.0" ]]
+  [[ ${lines[1]} == "" ]]
+}
+
 @test "Statistics as expected" {
   run bash -c 'echo ">stats >quit" | nc -v 127.0.0.1 4711'
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[1]} == "domains_being_blocked 4" ]]
-  [[ ${lines[2]} == "dns_queries_today 52" ]]
-  [[ ${lines[3]} == "ads_blocked_today 13" ]]
+  [[ ${lines[1]} == "domains_being_blocked 5" ]]
+  [[ ${lines[2]} == "dns_queries_today 54" ]]
+  [[ ${lines[3]} == "ads_blocked_today 15" ]]
   #[[ ${lines[4]} == "ads_percentage_today 7.792208" ]]
-  [[ ${lines[5]} == "unique_domains 37" ]]
+  [[ ${lines[5]} == "unique_domains 39" ]]
   [[ ${lines[6]} == "queries_forwarded 27" ]]
   [[ ${lines[7]} == "queries_cached 12" ]]
   # Clients ever seen is commented out as the CI may have
@@ -441,12 +452,12 @@
   # number of clients may not work in all cases
   #[[ ${lines[8]} == "clients_ever_seen 8" ]]
   #[[ ${lines[9]} == "unique_clients 8" ]]
-  [[ ${lines[10]} == "dns_queries_all_types 52" ]]
+  [[ ${lines[10]} == "dns_queries_all_types 54" ]]
   [[ ${lines[11]} == "reply_UNKNOWN 0" ]]
   [[ ${lines[12]} == "reply_NODATA 0" ]]
   [[ ${lines[13]} == "reply_NXDOMAIN 1" ]]
   [[ ${lines[14]} == "reply_CNAME 7" ]]
-  [[ ${lines[15]} == "reply_IP 23" ]]
+  [[ ${lines[15]} == "reply_IP 25" ]]
   [[ ${lines[16]} == "reply_DOMAIN 0" ]]
   [[ ${lines[17]} == "reply_RRNAME 5" ]]
   [[ ${lines[18]} == "reply_SERVFAIL 0" ]]
@@ -456,7 +467,7 @@
   [[ ${lines[22]} == "reply_DNSSEC 6" ]]
   [[ ${lines[23]} == "reply_NONE 0" ]]
   [[ ${lines[24]} == "reply_BLOB 10" ]]
-  [[ ${lines[25]} == "dns_queries_all_replies 52" ]]
+  [[ ${lines[25]} == "dns_queries_all_replies 54" ]]
   [[ ${lines[26]} == "privacy_level 0" ]]
   [[ ${lines[27]} == "status enabled" ]]
   [[ ${lines[28]} == "" ]]
@@ -471,7 +482,7 @@
 @test "Top Clients" {
   run bash -c 'echo ">top-clients >quit" | nc -v 127.0.0.1 4711'
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[1]} == "0 36 127.0.0.1 "* ]]
+  [[ ${lines[1]} == "0 38 127.0.0.1 "* ]]
   [[ ${lines[2]} == "1 6 :: "* ]]
   [[ ${lines[3]} == "2 4 127.0.0.3 "* ]]
   [[ ${lines[4]} == "3 3 127.0.0.2 "* ]]
@@ -519,12 +530,14 @@
   [[ "${lines[@]}" == *" 2 gravity-aaaa.ftl"* ]]
   [[ "${lines[@]}" == *" 1 blacklisted.ftl"* ]]
   [[ "${lines[@]}" == *" 1 whitelisted.ftl"* ]]
+  [[ "${lines[@]}" == *" 1 special.gravity.ftl"* ]]
+  [[ "${lines[@]}" == *" 1 a.b.c.d.special.gravity.ftl"* ]]
   [[ "${lines[@]}" == *" 1 regex5.ftl"* ]]
   [[ "${lines[@]}" == *" 1 regex1.ftl"* ]]
   [[ "${lines[@]}" == *" 1 cname-1.ftl"* ]]
   [[ "${lines[@]}" == *" 1 cname-7.ftl"* ]]
   [[ "${lines[@]}" == *" 1 use-application-dns.net"* ]]
-  [[ ${lines[12]} == "" ]]
+  [[ ${lines[14]} == "" ]]
 }
 
 @test "Domain auditing, approved domains are not shown" {
@@ -542,33 +555,33 @@
 @test "Upstream Destinations reported correctly" {
   run bash -c 'echo ">forward-dest >quit" | nc -v 127.0.0.1 4711'
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[1]} == "-3 25.00 blocked blocked" ]]
-  [[ ${lines[2]} == "-2 23.08 cached cached" ]]
+  [[ ${lines[1]} == "-3 27.78 blocked blocked" ]]
+  [[ ${lines[2]} == "-2 22.22 cached cached" ]]
   [[ ${lines[3]} == "-1 0.00 other other" ]]
-  [[ ${lines[4]} == "0 48.08 127.0.0.1#5555 127.0.0.1#5555" ]]
-  [[ ${lines[5]} == "1 3.85 127.0.0.1#5554 127.0.0.1#5554" ]]
+  [[ ${lines[4]} == "0 46.30 127.0.0.1#5555 127.0.0.1#5555" ]]
+  [[ ${lines[5]} == "1 3.70 127.0.0.1#5554 127.0.0.1#5554" ]]
   [[ ${lines[6]} == "" ]]
 }
 
 @test "Query Types reported correctly" {
   run bash -c 'echo ">querytypes >quit" | nc -v 127.0.0.1 4711'
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[1]}  == "A (IPv4): 50.00" ]]
-  [[ ${lines[2]}  == "AAAA (IPv6): 7.69" ]]
-  [[ ${lines[3]}  == "ANY: 1.92" ]]
-  [[ ${lines[4]}  == "SRV: 1.92" ]]
-  [[ ${lines[5]}  == "SOA: 1.92" ]]
-  [[ ${lines[6]}  == "PTR: 1.92" ]]
-  [[ ${lines[7]}  == "TXT: 11.54" ]]
-  [[ ${lines[8]}  == "NAPTR: 1.92" ]]
-  [[ ${lines[9]}  == "MX: 1.92" ]]
-  [[ ${lines[10]} == "DS: 5.77" ]]
+  [[ ${lines[1]}  == "A (IPv4): 51.85" ]]
+  [[ ${lines[2]}  == "AAAA (IPv6): 7.41" ]]
+  [[ ${lines[3]}  == "ANY: 1.85" ]]
+  [[ ${lines[4]}  == "SRV: 1.85" ]]
+  [[ ${lines[5]}  == "SOA: 1.85" ]]
+  [[ ${lines[6]}  == "PTR: 1.85" ]]
+  [[ ${lines[7]}  == "TXT: 11.11" ]]
+  [[ ${lines[8]}  == "NAPTR: 1.85" ]]
+  [[ ${lines[9]}  == "MX: 1.85" ]]
+  [[ ${lines[10]} == "DS: 5.56" ]]
   [[ ${lines[11]} == "RRSIG: 0.00" ]]
-  [[ ${lines[12]} == "DNSKEY: 5.77" ]]
-  [[ ${lines[13]} == "NS: 1.92" ]]
-  [[ ${lines[14]} == "OTHER: 1.92" ]]
-  [[ ${lines[15]} == "SVCB: 1.92" ]]
-  [[ ${lines[16]} == "HTTPS: 1.92" ]]
+  [[ ${lines[12]} == "DNSKEY: 5.56" ]]
+  [[ ${lines[13]} == "NS: 1.85" ]]
+  [[ ${lines[14]} == "OTHER: 1.85" ]]
+  [[ ${lines[15]} == "SVCB: 1.85" ]]
+  [[ ${lines[16]} == "HTTPS: 1.85" ]]
   [[ ${lines[17]} == "" ]]
 }
 
@@ -629,7 +642,9 @@
   [[ ${lines[50]} == *" DNSKEY dnssec.works :: 2 1 11 "*" N/A -1 127.0.0.1#5555 \"\" \"49\""* ]]
   [[ ${lines[51]} == *" A fail01.dnssec.works 127.0.0.1 2 3 4 "*" N/A -1 127.0.0.1#5555 \"RRSIG missing\" \"50\""* ]]
   [[ ${lines[52]} == *" DS fail01.dnssec.works :: 2 1 11 "*" N/A -1 127.0.0.1#5555 \"\" \"51\""* ]]
-  [[ ${lines[53]} == "" ]]
+  [[ ${lines[53]} == *" A special.gravity.ftl 127.0.0.1 1 2 4 "*" N/A -1 N/A#0 \"\" \"52\""* ]]
+  [[ ${lines[54]} == *" A a.b.c.d.special.gravity.ftl 127.0.0.1 1 2 4 "*" N/A -1 N/A#0 \"\" \"53\""* ]]
+  [[ ${lines[55]} == "" ]]
 }
 
 @test "Get all queries (domain filtered) shows expected content" {
@@ -642,7 +657,7 @@
 @test "Recent blocked shows expected content" {
   run bash -c 'echo ">recentBlocked >quit" | nc -v 127.0.0.1 4711'
   printf "%s\n" "${lines[@]}"
-  [[ ${lines[1]} == "aaaa-cname.ftl" ]]
+  [[ ${lines[1]} == "a.b.c.d.special.gravity.ftl" ]]
   [[ ${lines[2]} == "" ]]
 }
 
@@ -998,7 +1013,7 @@
   run bash -c './pihole-FTL regex-test "f" g\;querytype=!A\;querytype=A'
   printf "%s\n" "${lines[@]}"
   [[ $status == 2 ]]
-  [[ ${lines[1]} == *"Overwriting previous querytype setting" ]]
+  [[ "${lines[@]}" == *"Overwriting previous querytype setting"* ]]
 }
 
 @test "Regex Test 41: Option \"^;reply=NXDOMAIN\" working as expected" {
@@ -1050,14 +1065,14 @@
   run bash -c './pihole-FTL regex-test "f" f\;querytype=A'
   printf "%s\n" "${lines[@]}"
   [[ $status == 0 ]]
-  [[ ${lines[4]} == "    Hint: This regex matches only type A queries" ]]
+  [[ "${lines[@]}" == *"- A"* ]]
 }
 
 @test "Regex Test 48: Option \";querytype=!TXT\" reported on CLI" {
   run bash -c './pihole-FTL regex-test "f" f\;querytype=!TXT'
   printf "%s\n" "${lines[@]}"
   [[ $status == 0 ]]
-  [[ ${lines[4]} == "    Hint: This regex does not match type TXT queries" ]]
+  [[ "${lines[@]}" != *"- TXT"* ]]
 }
 
 @test "Regex Test 49: Option \";reply=NXDOMAIN\" reported on CLI" {
@@ -1072,6 +1087,50 @@
   printf "%s\n" "${lines[@]}"
   [[ $status == 0 ]]
   [[ ${lines[4]} == "    Hint: This regex is inverted" ]]
+}
+
+@test "Regex Test 51: Option \";querytype=A,HTTPS\" reported on CLI" {
+  run bash -c './pihole-FTL regex-test "f" f\;querytype=A,HTTPS'
+  printf "%s\n" "${lines[@]}"
+  [[ $status == 0 ]]
+  [[ "${lines[@]}" == *"- A"* ]]
+  [[ "${lines[@]}" == *"- HTTPS"* ]]
+}
+
+@test "Regex Test 52: Option \";querytype=ANY,HTTPS,SVCB;reply=refused\" working as expected (ONLY matching ANY, HTTPS or SVCB queries)" {
+  run bash -c 'dig A regex-multiple.ftl @127.0.0.1'
+  printf "dig A: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: NOERROR"* ]]
+  run bash -c 'dig AAAA regex-multiple.ftl @127.0.0.1'
+  printf "dig AAAA: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: NOERROR"* ]]
+  run bash -c 'dig SVCB regex-multiple.ftl @127.0.0.1'
+  printf "dig SVCB: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: REFUSED"* ]]
+  run bash -c 'dig HTTPS regex-multiple.ftl @127.0.0.1'
+  printf "dig HTTPS: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: REFUSED"* ]]
+  run bash -c 'dig ANY regex-multiple.ftl @127.0.0.1'
+  printf "dig ANY: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: REFUSED"* ]]
+}
+
+@test "Regex Test 53: Option \";querytype=!ANY,HTTPS,SVCB;reply=refused\" working as expected (NOT matching ANY, HTTPS or SVCB queries)" {
+  run bash -c 'dig A regex-notMultiple.ftl @127.0.0.1'
+  printf "dig A: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: REFUSED"* ]]
+  run bash -c 'dig AAAA regex-notMultiple.ftl @127.0.0.1'
+  printf "dig AAAA: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: REFUSED"* ]]
+  run bash -c 'dig SVCB regex-notMultiple.ftl @127.0.0.1'
+  printf "dig SVCB: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: NOERROR"* ]]
+  run bash -c 'dig HTTPS regex-notMultiple.ftl @127.0.0.1'
+  printf "dig HTTPS: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: NOERROR"* ]]
+  run bash -c 'dig ANY regex-notMultiple.ftl @127.0.0.1'
+  printf "dig ANY: %s\n" "${lines[@]}"
+  [[ "${lines[@]}" == *"status: NOERROR"* ]]
 }
 
 # x86_64-musl is built on busybox which has a slightly different
