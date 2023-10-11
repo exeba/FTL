@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 
+bool check_capability(const unsigned int cap);
 bool check_capabilities(void);
 
 #endif //CAPABILITIES_H

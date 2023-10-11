@@ -126,8 +126,6 @@ set(sources
         daemon.h
         datastructure.c
         datastructure.h
-        dhcp-discover.c
-        dhcp-discover.h
         dnsmasq_interface.c
         dnsmasq_interface.h
         edns0.c
@@ -190,6 +188,7 @@ add_executable(pihole-FTL
         $<TARGET_OBJECTS:lua>
         $<TARGET_OBJECTS:tre-regex>
         $<TARGET_OBJECTS:syscalls>
+        $<TARGET_OBJECTS:tools>
         )
 if(STATIC STREQUAL "true")
     set_target_properties(pihole-FTL PROPERTIES LINK_SEARCH_START_STATIC ON)
@@ -267,3 +266,4 @@ add_subdirectory(lua)
 add_subdirectory(lua/scripts)
 add_subdirectory(tre-regex)
 add_subdirectory(syscalls)
+add_subdirectory(tools)
