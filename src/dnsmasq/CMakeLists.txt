@@ -18,9 +18,11 @@ set(sources
         dnsmasq.h
         dnssec.c
         domain.c
+        domain-match.c
         dump.c
         edns0.c
         forward.c
+        hash-questions.c
         helper.c
         inotify.c
         ip6addr.h
@@ -32,8 +34,10 @@ set(sources
         metrics.h
         netlink.c
         network.c
+        nftset.c
         option.c
         outpacket.c
+        pattern.c
         poll.c
         radv-protocol.h
         radv.c
@@ -49,6 +53,6 @@ set(sources
         )
 
 add_library(dnsmasq OBJECT ${sources})
-target_compile_definitions(dnsmasq PRIVATE VERSION=\"${DNSMASQ_VERSION}\" HAVE_DNSSEC HAVE_DNSSEC_STATIC HAVE_IDN)
+target_compile_definitions(dnsmasq PRIVATE VERSION=\"${DNSMASQ_VERSION}\")
 target_compile_options(dnsmasq PRIVATE -Wno-maybe-uninitialized)
-target_include_directories(dnsmasq PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_include_directories(dnsmasq PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/src/lua)

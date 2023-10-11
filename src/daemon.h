@@ -10,13 +10,18 @@
 #ifndef DAEMON_H
 #define DAEMON_H
 
+#include "enums.h"
+extern pthread_t threads[THREADS_MAX];
+#define MAX_API_THREADS 5
+extern pthread_t api_threads[MAX_API_THREADS];
+
 void go_daemon(void);
 void savepid(void);
-char * getUserName(void);
-void removepid(void);
+char *getUserName(void);
+const char *hostname(void);
 void delay_startup(void);
 bool is_fork(const pid_t mpid, const pid_t pid) __attribute__ ((const));
-
+void cleanup(const int ret);
 
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -32,5 +37,7 @@ bool is_fork(const pid_t mpid, const pid_t pid) __attribute__ ((const));
 #endif // !SYS_gettid && __NR_gettid
 pid_t FTL_gettid(void);
 #define gettid FTL_gettid
+
+extern bool resolver_ready;
 
 #endif //DAEMON_H

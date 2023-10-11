@@ -10,11 +10,25 @@
 
 #include "FTL.h"
 #include "daemon.h"
-#include "memory.h"
 #include "config.h"
 #include "log.h"
 // sleepms()
 #include "timers.h"
+// gravityDB_close()
+#include "database/gravity-db.h"
+// destroy_shmem()
+#include "shmem.h"
+// uname()
+#include <sys/utsname.h>
+// killed
+#include "signals.h"
+// sysinfo()
+#include <sys/sysinfo.h>
+#include <errno.h>
+
+pthread_t threads[THREADS_MAX] = { 0 };
+pthread_t api_threads[MAX_API_THREADS] = { 0 };
+bool resolver_ready = false;
 
 void go_daemon(void)
 {
@@ -98,10 +112,10 @@ void savepid(void)
 	logg("PID of FTL process: %i", (int)pid);
 }
 
-void removepid(void)
+static void removepid(void)
 {
 	FILE *f;
-	if((f = fopen(FTLfiles.pid, "w+")) == NULL)
+	if((f = fopen(FTLfiles.pid, "w")) == NULL)
 	{
 		logg("WARNING: Unable to empty PID file");
 		return;
@@ -111,7 +125,7 @@ void removepid(void)
 
 char *getUserName(void)
 {
-	char * name;
+	char *name;
 	// the getpwuid() function shall search the user database for an entry with a matching uid
 	// the geteuid() function shall return the effective user ID of the calling process - this is used as the search criteria for the getpwuid() function
 	const uid_t euid = geteuid();
@@ -129,17 +143,60 @@ char *getUserName(void)
 	return name;
 }
 
+// "man 7 hostname" says:
+//
+//     Each element of the hostname must be from 1 to 63 characters long and the
+//     entire hostname, including the dots, can be at most 253 characters long.
+//
+//     Valid characters for hostnames are ASCII(7) letters from a to z, the
+//     digits from 0 to 9, and the hyphen (-). A hostname may not start with a
+//     hyphen.
+#define HOSTNAMESIZE 256
+static char nodename[HOSTNAMESIZE] = { 0 };
+const char *hostname(void)
+{
+	// Ask kernel for node name if not known
+	// This is equivalent to "uname -n"
+	if(nodename[0] == '\0')
+	{
+		struct utsname buf;
+		if(uname(&buf) == 0)
+			strncpy(nodename, buf.nodename, HOSTNAMESIZE);
+		nodename[HOSTNAMESIZE-1] = '\0';
+	}
+	return nodename;
+}
+
 void delay_startup(void)
 {
 	// Exit early if not sleeping
 	if(config.delay_startup == 0u)
 		return;
 
+	// Get uptime of system
+	struct sysinfo info = { 0 };
+	if(sysinfo(&info) == 0)
+	{
+		if(info.uptime > DELAY_UPTIME)
+		{
+			logg("Not sleeping as system has finished booting");
+			return;
+		}
+	}
+	else
+	{
+		logg("Unable to obtain sysinfo: %s (%i)", strerror(errno), errno);
+	}
+
 	// Sleep if requested by DELAY_STARTUP
-	logg("Sleeping for %d seconds as requested by configuration ...",
-	     config.delay_startup);
-	sleep(config.delay_startup);
-	logg("Done sleeping, continuing startup of resolver...\n");
+	logg("Sleeping for %d seconds as requested by configuration ...", config.delay_startup);
+	if(sleep(config.delay_startup) != 0)
+	{
+		logg("FATAL: Sleeping was interrupted by an external signal");
+		cleanup(EXIT_FAILURE);
+		exit(EXIT_FAILURE);
+	}
+	logg("Done sleeping, continuing startup of resolver...");
 }
 
 // Is this a fork?
@@ -156,4 +213,81 @@ pid_t FTL_gettid(void)
 #warning SYS_gettid is not available on this system
 	return -1;
 #endif // SYS_gettid
+}
+
+static void terminate_threads(void)
+{
+	struct timespec ts;
+	// Terminate threads before closing database connections and finishing shared memory
+	killed = true;
+	// Try to join threads to ensure cancellation has succeeded
+	logg("Waiting for threads to join");
+	for(int i = 0; i < THREADS_MAX; i++)
+	{
+		if(thread_cancellable[i])
+		{
+			logg("Thread %s (%d) is idle, terminating it.",
+			     thread_names[i], i);
+			pthread_cancel(threads[i]);
+		}
+
+		if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
+		{
+			logg("Thread %s (%d) is busy, cancelling it (cannot set timeout).",
+			     thread_names[i], i);
+			pthread_cancel(threads[i]);
+			continue;
+		}
+
+		// Timeout for joining is 2 seconds for each thread
+		ts.tv_sec += 2;
+
+		const int s = pthread_timedjoin_np(threads[i], NULL, &ts);
+		if(s != 0)
+		{
+			logg("Thread %s (%d) is still busy, cancelling it.",
+			     thread_names[i], i);
+			pthread_cancel(threads[i]);
+			continue;
+		}
+	}
+	logg("All threads joined");
+}
+
+// Clean up on exit
+void cleanup(const int ret)
+{
+	// Do proper cleanup only if FTL started successfully
+	if(resolver_ready)
+	{
+		// Terminate threads
+		terminate_threads();
+
+		// Cancel and join possibly still running API worker threads
+		for(unsigned int tid = 0; tid < MAX_API_THREADS; tid++)
+		{
+			// Otherwise, cancel and join the thread
+			logg("Joining API worker thread %d", tid);
+			pthread_cancel(api_threads[tid]);
+			pthread_join(api_threads[tid], NULL);
+		}
+
+		// Close database connection
+		lock_shm();
+		gravityDB_close();
+		unlock_shm();
+	}
+
+	// Remove PID file
+	removepid();
+
+	// Remove shared memory objects
+	// Important: This invalidated all objects such as
+	//            counters-> ... etc.
+	// This should be the last action when cleaning up
+	destroy_shmem();
+
+	char buffer[42] = { 0 };
+	format_time(buffer, 0, timer_elapsed_msec(EXIT_TIMER));
+	logg("########## FTL terminated after%s (code %i)! ##########", buffer, ret);
 }

@@ -26,13 +26,12 @@ typedef struct sqlite3_stmt_vec {
 	sqlite3_stmt **items;
 	sqlite3_stmt *(*get)(struct sqlite3_stmt_vec *, unsigned int);
 	void (*set)(struct sqlite3_stmt_vec *, unsigned int, sqlite3_stmt*);
-	void (*free)(struct sqlite3_stmt_vec *);
 } sqlite3_stmt_vec;
 
 sqlite3_stmt_vec *new_sqlite3_stmt_vec(unsigned int initial_size);
 void set_sqlite3_stmt_vec(sqlite3_stmt_vec *v, unsigned int index, sqlite3_stmt* item);
 sqlite3_stmt* get_sqlite3_stmt_vec(sqlite3_stmt_vec *v, unsigned int index) __attribute__((pure));
 void del_sqlite3_stmt_vec(sqlite3_stmt_vec *v, unsigned int index);
-void free_sqlite3_stmt_vec(sqlite3_stmt_vec *v);
+void free_sqlite3_stmt_vec(sqlite3_stmt_vec **v);
 
 #endif //VECTOR_H

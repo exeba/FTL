@@ -26,33 +26,41 @@ enum counters_table_props {
 } __attribute__ ((packed));
 
 void db_init(void);
-int db_get_FTL_property(const enum ftl_table_props ID);
-bool db_set_FTL_property(const enum ftl_table_props ID, const int value);
+int db_get_int(sqlite3* db, const enum ftl_table_props ID);
+bool db_set_FTL_property(sqlite3 *db, const enum ftl_table_props ID, const long value);
+bool db_set_counter(sqlite3 *db, const enum counters_table_props ID, const long value);
 
 /// Execute a formatted SQL query and get the return code
-int dbquery(const char *format, ...);
+int dbquery(sqlite3* db, const char *format, ...) __attribute__ ((format (gnu_printf, 2, 3)));;
 
-bool FTL_DB_avail(void) __attribute__ ((pure));
-bool dbopen(void);
-void dbclose(void);
-int db_query_int(const char*);
-long get_lastID(void);
+#define dbopen(create) _dbopen(create, __FUNCTION__, __LINE__, __FILE__)
+sqlite3 *_dbopen(bool create, const char *func, const int line, const char *file) __attribute__((warn_unused_result));
+#define dbclose(db) _dbclose(db, __FUNCTION__, __LINE__, __FILE__)
+void _dbclose(sqlite3 **db, const char *func, const int line, const char *file);
+
+int db_query_int(sqlite3 *db, const char *querystr);
 void SQLite3LogCallback(void *pArg, int iErrCode, const char *zMsg);
-long int get_max_query_ID(void);
-bool db_set_counter(const enum counters_table_props ID, const int value);
-bool db_update_counters(const int total, const int blocked);
+long int get_max_query_ID(sqlite3 *db);
+bool db_update_counters(sqlite3 *db, const int total, const int blocked);
 const char *get_sqlite3_version(void);
-bool use_database(void)  __attribute__ ((pure));
 
-extern sqlite3 *FTL_db;
-extern bool database;
 extern long int lastdbindex;
 extern bool DBdeleteoldqueries;
 
+// Return if FTL's database is known to be broken
+// We abort execution of all database-related activities in this case
+bool FTLDBerror(void) __attribute__ ((pure));
+
+// Check SQLite3 non-success return codes for possible database corruption
+bool checkFTLDBrc(const int rc);
+
+// Get human-readable *extended* error codes (defined in sqlite3.c)
+extern const char *sqlite3ErrName(int rc);
+
 // Database macros
-#define SQL_bool(sql) {\
+#define SQL_bool(db, ...) {\
 	int ret;\
-	if((ret = dbquery(sql)) != SQLITE_OK) {\
+	if((ret = dbquery(db, __VA_ARGS__)) != SQLITE_OK) {\
 		if(ret == SQLITE_BUSY)\
 			logg("WARNING: Database busy in %s()!", __FUNCTION__);\
 		else\
@@ -61,9 +69,9 @@ extern bool DBdeleteoldqueries;
 	}\
 }
 
-#define SQL_void(sql) {\
+#define SQL_void(db, ...) {\
 	int ret;\
-	if((ret = dbquery(sql)) != SQLITE_OK) {\
+	if((ret = dbquery(db, __VA_ARGS__)) != SQLITE_OK) {\
 		if(ret == SQLITE_BUSY)\
 			logg("WARNING: Database busy in %s()!", __FUNCTION__);\
 		else\

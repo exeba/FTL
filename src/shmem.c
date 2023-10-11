@@ -9,29 +9,51 @@
 *  Please see LICENSE file for your rights under this license. */
 
 #include "FTL.h"
+#define SHMEM_PRIVATE
 #include "shmem.h"
 #include "overTime.h"
 #include "log.h"
-#include "memory.h"
 #include "config.h"
 // data getter functions
 #include "datastructure.h"
+// get_num_regex()
+#include "regex_r.h"
+// NAME_MAX
+#include <limits.h>
+// gettid
+#include "daemon.h"
+// generate_backtrace()
+#include "signals.h"
+// get_path_usage()
+#include "files.h"
+// log_resource_shortage()
+#include "database/message-table.h"
+// check_running_FTL()
+#include "procps.h"
 
 /// The version of shared memory used
-#define SHARED_MEMORY_VERSION 9
+#define SHARED_MEMORY_VERSION 14
 
 /// The name of the shared memory. Use this when connecting to the shared memory.
-#define SHARED_LOCK_NAME "/FTL-lock"
-#define SHARED_STRINGS_NAME "/FTL-strings"
-#define SHARED_COUNTERS_NAME "/FTL-counters"
-#define SHARED_DOMAINS_NAME "/FTL-domains"
-#define SHARED_CLIENTS_NAME "/FTL-clients"
-#define SHARED_QUERIES_NAME "/FTL-queries"
-#define SHARED_UPSTREAMS_NAME "/FTL-upstreams"
-#define SHARED_OVERTIME_NAME "/FTL-overTime"
-#define SHARED_SETTINGS_NAME "/FTL-settings"
-#define SHARED_DNS_CACHE "/FTL-dns-cache"
-#define SHARED_PER_CLIENT_REGEX "/FTL-per-client-regex"
+#define SHMEM_PATH "/dev/shm"
+#define SHARED_LOCK_NAME "FTL-lock"
+#define SHARED_STRINGS_NAME "FTL-strings"
+#define SHARED_COUNTERS_NAME "FTL-counters"
+#define SHARED_DOMAINS_NAME "FTL-domains"
+#define SHARED_CLIENTS_NAME "FTL-clients"
+#define SHARED_QUERIES_NAME "FTL-queries"
+#define SHARED_UPSTREAMS_NAME "FTL-upstreams"
+#define SHARED_OVERTIME_NAME "FTL-overTime"
+#define SHARED_SETTINGS_NAME "FTL-settings"
+#define SHARED_DNS_CACHE "FTL-dns-cache"
+#define SHARED_PER_CLIENT_REGEX "FTL-per-client-regex"
+
+// Allocation step for FTL-strings bucket. This is somewhat special as we use
+// this as a general-purpose storage which should always be large enough. If,
+// for some reason, more data than this step has to be stored (highly unlikely,
+// close to impossible), the data will be properly truncated and we try again in
+// the next lock round
+#define STRINGS_ALLOC_STEP (10*pagesize)
 
 // Global counters struct
 countersStruct *counters = NULL;
@@ -49,6 +71,19 @@ static SharedMemory shm_settings = { 0 };
 static SharedMemory shm_dns_cache = { 0 };
 static SharedMemory shm_per_client_regex = { 0 };
 
+static SharedMemory *sharedMemories[] = { &shm_lock,
+                                          &shm_strings,
+                                          &shm_counters,
+                                          &shm_domains,
+                                          &shm_clients,
+                                          &shm_queries,
+                                          &shm_upstreams,
+                                          &shm_overTime,
+                                          &shm_settings,
+                                          &shm_dns_cache,
+                                          &shm_per_client_regex };
+#define NUM_SHMEM (sizeof(sharedMemories)/sizeof(SharedMemory*))
+
 // Variable size array structs
 static queriesData *queries = NULL;
 static clientsData *clients = NULL;
@@ -57,16 +92,79 @@ static upstreamsData *upstreams = NULL;
 static DNSCacheData *dns_cache = NULL;
 
 typedef struct {
-	pthread_mutex_t lock;
-	bool waitingForLock;
+	struct {
+		pthread_mutex_t outer;
+		pthread_mutex_t inner;
+	} lock;
+	struct {
+		volatile pid_t pid;
+		volatile pid_t tid;
+	} owner;
 } ShmLock;
 static ShmLock *shmLock = NULL;
 static ShmSettings *shmSettings = NULL;
 
 static int pagesize;
 static unsigned int local_shm_counter = 0;
-
+static pid_t shmem_pid = 0;
+static size_t used_shmem = 0u;
 static size_t get_optimal_object_size(const size_t objsize, const size_t minsize);
+
+// Private prototypes
+static void *enlarge_shmem_struct(const char type);
+
+static int get_dev_shm_usage(char buffer[64])
+{
+	char buffer2[64] = { 0 };
+	const int percentage = get_path_usage(SHMEM_PATH, buffer2);
+
+	// Generate human-readable "used by FTL" size
+	char prefix_FTL[2] = { 0 };
+	double formatted_FTL = 0.0;
+	format_memory_size(prefix_FTL, used_shmem, &formatted_FTL);
+
+	// Print result into buffer passed to this subroutine
+	snprintf(buffer, 64, "%s, FTL uses %.1f%sB",
+	         buffer2, formatted_FTL, prefix_FTL);
+
+	// Return percentage
+	return percentage;
+}
+
+// Verify the PID stored during shared memory initialization is the same as ours
+// (while we initialized the shared memory objects)
+static void verify_shmem_pid(void)
+{
+	// Open shared memory settings object
+	const int settingsfd = shm_open(SHARED_SETTINGS_NAME, O_RDONLY, S_IRUSR | S_IWUSR);
+	if(settingsfd == -1)
+	{
+		logg("FATAL: verify_shmem_pid(): Failed to open shared memory object \"%s\": %s",
+			SHARED_SETTINGS_NAME, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	ShmSettings shms = { 0 };
+	if(read(settingsfd, &shms, sizeof(shms)) != sizeof(shms))
+	{
+		logg("FATAL: verify_shmem_pid(): Failed to read %zu bytes from shared memory object \"%s\": %s",
+			sizeof(shms), SHARED_SETTINGS_NAME, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	close(settingsfd);
+
+	// Compare the SHM's PID to the one we had when creating the SHM objects
+	if(shms.pid == shmem_pid)
+		return;
+
+	// If we reach here, we are in serious trouble. Terminating with error
+	// code is the most sensible thing we can do at this point
+	logg("FATAL: Shared memory is owned by a different process (PID %d)", shms.pid);
+	check_running_FTL();
+	logg("Exiting now!");
+	exit(EXIT_FAILURE);
+}
 
 // chown_shmem() changes the file ownership of a given shared memory object
 static bool chown_shmem(SharedMemory *sharedMemory, struct passwd *ent_pw)
@@ -93,60 +191,117 @@ static bool chown_shmem(SharedMemory *sharedMemory, struct passwd *ent_pw)
 	return true;
 }
 
-void chown_all_shmem(struct passwd *ent_pw)
+// A function that duplicates a string and replaces all characters "s" by "r"
+static char *__attribute__ ((malloc)) str_replace(const char *input,
+                                                  const char s,
+                                                  const char r,
+                                                  unsigned int *N)
 {
-	chown_shmem(&shm_lock, ent_pw);
-	chown_shmem(&shm_strings, ent_pw);
-	chown_shmem(&shm_counters, ent_pw);
-	chown_shmem(&shm_domains, ent_pw);
-	chown_shmem(&shm_clients, ent_pw);
-	chown_shmem(&shm_queries, ent_pw);
-	chown_shmem(&shm_upstreams, ent_pw);
-	chown_shmem(&shm_overTime, ent_pw);
-	chown_shmem(&shm_settings, ent_pw);
-	chown_shmem(&shm_dns_cache, ent_pw);
-	chown_shmem(&shm_per_client_regex, ent_pw);
+	// Duplicate string
+	char *copy = strdup(input);
+	if(!copy)
+		return NULL;
+
+	// Woring pointer
+	char *ix = copy;
+	// Loop over string until there are no further "s" chars in the string
+	while((ix = strchr(ix, s)) != NULL)
+	{
+		*ix++ = r;
+		(*N)++;
+	}
+
+	return copy;
 }
 
-size_t addstr(const char *str)
+char *__attribute__ ((malloc)) str_escape(const char *input, unsigned int *N)
 {
-	if(str == NULL)
+	// If no escaping is done, this routine returns the original pointer
+	// and N stays 0
+	*N = 0;
+	if(strchr(input, ' ') != NULL)
+	{
+		// Replace any spaces by ~ if we find them in the domain name
+		// This is necessary as our telnet API uses space delimiters
+		return str_replace(input, ' ', '~', N);
+	}
+
+	return strdup(input);
+}
+
+bool strcmp_escaped(const char *a, const char *b)
+{
+	unsigned int Na, Nb;
+
+	// Input check
+	if(a == NULL || b == NULL)
+		return false;
+
+	// Escape both inputs
+	char *aa = str_escape(a, &Na);
+	char *bb = str_escape(b, &Nb);
+
+	// Check for memory errors
+	if(!aa || !bb)
+	{
+		if(aa) free(aa);
+		if(bb) free(bb);
+		return false;
+	}
+
+	const char result = strcasecmp(aa, bb) == 0;
+
+	free(aa);
+	free(bb);
+
+	return result;
+}
+
+
+size_t addstr(const char *input)
+{
+	if(input == NULL)
 	{
 		logg("WARN: Called addstr() with NULL pointer");
 		return 0;
 	}
 
 	// Get string length, add terminating character
-	size_t len = strlen(str) + 1;
+	size_t len = strlen(input) + 1;
+	const size_t avail_mem = shm_strings.size - shmSettings->next_str_pos;
 
 	// If this is an empty string (only the terminating character is present),
 	// use the shared memory string at position zero instead of creating a new
 	// entry here. We also ensure that the given string is not too long to
 	// prevent possible memory corruption caused by strncpy() further down
-	if(len == 1) {
+	if(len == 1)
+	{
 		return 0;
 	}
 	else if(len > (size_t)(pagesize-1))
 	{
-		logg("WARN: Shortening too long string (len %zu)", len);
+		logg("WARN: Shortening too long string (len %zu > pagesize %i)", len, pagesize);
 		len = pagesize;
 	}
+	else if(len > (size_t)(avail_mem-1))
+	{
+		logg("WARN: Shortening too long string (len %zu > available memory %zu)", len, avail_mem);
+		len = avail_mem;
+	}
+
+	unsigned int N = 0;
+	char *str = str_escape(input, &N);
+
+	if(N > 0)
+		logg("INFO: FTL replaced %u invalid characters with ~ in the query \"%s\"", N, str);
 
 	// Debugging output
 	if(config.debug & DEBUG_SHMEM)
 		logg("Adding \"%s\" (len %zu) to buffer. next_str_pos is %u", str, len, shmSettings->next_str_pos);
 
-	// Reserve additional memory if necessary
-	if(shmSettings->next_str_pos + len > shm_strings.size &&
-	   !realloc_shm(&shm_strings, shm_strings.size + pagesize, true))
-		return 0;
-
-	// Store new string buffer size in corresponding counters entry
-	// for re-using when we need to re-map shared memory objects
-	counters->strings_MAX = shm_strings.size;
-
 	// Copy the C string pointed by str into the shared string buffer
 	strncpy(&((char*)shm_strings.ptr)[shmSettings->next_str_pos], str, len);
+	free(str);
 
 	// Increment string length counter
 	shmSettings->next_str_pos += len;
@@ -155,20 +310,21 @@ size_t addstr(const char *str)
 	return (shmSettings->next_str_pos - len);
 }
 
-const char *getstr(const size_t pos)
+const char *_getstr(const size_t pos, const char *func, const int line, const char *file)
 {
 	// Only access the string memory if this memory region has already been set
 	if(pos < shmSettings->next_str_pos)
 		return &((const char*)shm_strings.ptr)[pos];
 	else
 	{
-		logg("WARN: Tried to access %zu but next_str_pos is %u", pos, shmSettings->next_str_pos);
+		logg("WARN: Tried to access %zu in %s() (%s:%i) but next_str_pos is %u", pos, func, file, line, shmSettings->next_str_pos);
 		return "";
 	}
 }
 
 /// Create a mutex for shared memory
 static pthread_mutex_t create_mutex(void) {
+	logg("Creating mutex");
 	pthread_mutexattr_t lock_attr = {};
 	pthread_mutex_t lock = {};
 
@@ -193,39 +349,56 @@ static pthread_mutex_t create_mutex(void) {
 static void remap_shm(void)
 {
 	// Remap shared object pointers which might have changed
-	realloc_shm(&shm_queries, counters->queries_MAX*sizeof(queriesData), false);
+	realloc_shm(&shm_queries, counters->queries_MAX, sizeof(queriesData), false);
 	queries = (queriesData*)shm_queries.ptr;
 
-	realloc_shm(&shm_domains, counters->domains_MAX*sizeof(domainsData), false);
+	realloc_shm(&shm_domains, counters->domains_MAX, sizeof(domainsData), false);
 	domains = (domainsData*)shm_domains.ptr;
 
-	realloc_shm(&shm_clients, counters->clients_MAX*sizeof(clientsData), false);
+	realloc_shm(&shm_clients, counters->clients_MAX, sizeof(clientsData), false);
 	clients = (clientsData*)shm_clients.ptr;
 
-	realloc_shm(&shm_upstreams, counters->upstreams_MAX*sizeof(upstreamsData), false);
+	realloc_shm(&shm_upstreams, counters->upstreams_MAX, sizeof(upstreamsData), false);
 	upstreams = (upstreamsData*)shm_upstreams.ptr;
 
-	realloc_shm(&shm_dns_cache, counters->dns_cache_MAX*sizeof(DNSCacheData), false);
+	realloc_shm(&shm_dns_cache, counters->dns_cache_MAX, sizeof(DNSCacheData), false);
 	dns_cache = (DNSCacheData*)shm_dns_cache.ptr;
 
-	realloc_shm(&shm_strings, counters->strings_MAX, false);
+	realloc_shm(&shm_per_client_regex, counters->per_client_regex_MAX, sizeof(bool), false);
+	// per-client-regex bools are not exposed by a global pointer
+
+	realloc_shm(&shm_strings, counters->strings_MAX, sizeof(char), false);
 	// strings are not exposed by a global pointer
 
 	// Update local counter to reflect that we absorbed this change
 	local_shm_counter = shmSettings->global_shm_counter;
 }
 
-void _lock_shm(const char* func, const int line, const char * file) {
-	// Signal that FTL is waiting for a lock
-	shmLock->waitingForLock = true;
-
+// Obtain SHMEM lock
+void _lock_shm(const char *func, const int line, const char *file)
+{
 	if(config.debug & DEBUG_LOCKS)
-		logg("Waiting for lock in %s() (%s:%i)", func, file, line);
+		logg("Waiting for SHM lock in %s() (%s:%i)", func, file, line);
 
-	int result = pthread_mutex_lock(&shmLock->lock);
+	int result = pthread_mutex_lock(&shmLock->lock.outer);
 
-	if(config.debug & DEBUG_LOCKS)
-		logg("Obtained lock for %s() (%s:%i)", func, file, line);
+	if(result != 0)
+		logg("Error when obtaining outer SHM lock: %s", strerror(result));
+
+	if(result == EOWNERDEAD) {
+		// Try to make the lock consistent if the other process died while
+		// holding the lock
+		if(config.debug & DEBUG_LOCKS)
+			logg("Owner of outer SHM lock died, making lock consistent");
+
+		result = pthread_mutex_consistent(&shmLock->lock.outer);
+		if(result != 0)
+			logg("Failed to make outer SHM lock consistent: %s", strerror(result));
+	}
+
+	// Store lock owner after lock has been acquired and was made consistent (if required)
+	shmLock->owner.pid = getpid();
+	shmLock->owner.tid = gettid();
 
 	// Check if this process needs to remap the shared memory objects
 	if(shmSettings != NULL &&
@@ -237,31 +410,64 @@ void _lock_shm(const char* func, const int line, const char * file) {
 		remap_shm();
 	}
 
-	// Turn off the waiting for lock signal to notify everyone who was
-	// deferring to FTL that they can jump in the lock queue.
-	shmLock->waitingForLock = false;
+	// Ensure we have enough shared memory available for new data
+	shm_ensure_size();
+
+	result = pthread_mutex_lock(&shmLock->lock.inner);
+
+	if(config.debug & DEBUG_LOCKS)
+		logg("Obtained SHM lock for %s() (%s:%i)", func, file, line);
+
+	if(result != 0)
+		logg("Error when obtaining inner SHM lock: %s", strerror(result));
 
 	if(result == EOWNERDEAD) {
 		// Try to make the lock consistent if the other process died while
 		// holding the lock
-		result = pthread_mutex_consistent(&shmLock->lock);
-	}
+		if(config.debug & DEBUG_LOCKS)
+			logg("Owner of inner SHM lock died, making lock consistent");
 
-	if(result != 0)
-		logg("Failed to obtain SHM lock: %s", strerror(result));
+		result = pthread_mutex_consistent(&shmLock->lock.inner);
+		if(result != 0)
+			logg("Failed to make inner SHM lock consistent: %s", strerror(result));
+	}
 }
 
-void _unlock_shm(const char* func, const int line, const char * file) {
-	int result = pthread_mutex_unlock(&shmLock->lock);
+// Release SHM lock
+void _unlock_shm(const char* func, const int line, const char * file)
+{
+	if(config.debug & DEBUG_LOCKS && !is_our_lock())
+	{
+		logg("ERROR: Tried to unlock but lock is owned by %li/%li",
+		     (long int)shmLock->owner.pid, (long int)shmLock->owner.tid);
+	}
+
+	// Unlock mutex
+	int result = pthread_mutex_unlock(&shmLock->lock.inner);
+	shmLock->owner.pid = 0;
+	shmLock->owner.tid = 0;
 
 	if(config.debug & DEBUG_LOCKS)
 		logg("Removed lock in %s() (%s:%i)", func, file, line);
 
 	if(result != 0)
-		logg("Failed to unlock SHM lock: %s", strerror(result));
+		logg("Failed to unlock inner SHM lock: %s", strerror(result));
+
+	result = pthread_mutex_unlock(&shmLock->lock.outer);
+	if(result != 0)
+		logg("Failed to unlock outer SHM lock: %s", strerror(result));
 }
 
-bool init_shmem(void)
+// Return if we locked this mutex (PID and TID match)
+bool is_our_lock(void)
+{
+	if(shmLock->owner.pid == getpid() &&
+	   shmLock->owner.tid == gettid())
+		return true;
+	return false;
+}
+
+bool init_shmem()
 {
 	// Get kernel's page size
 	pagesize = getpagesize();
@@ -269,41 +475,61 @@ bool init_shmem(void)
 	/****************************** shared memory lock ******************************/
 	// Try to create shared memory object
 	shm_lock = create_shm(SHARED_LOCK_NAME, sizeof(ShmLock));
-	shmLock = (ShmLock*) shm_lock.ptr;
-	shmLock->lock = create_mutex();
-	shmLock->waitingForLock = false;
+	if(shm_lock.ptr == NULL)
+		return false;
+
+	shmLock = (ShmLock*)shm_lock.ptr;
+	shmLock->lock.outer = create_mutex();
+	shmLock->lock.inner = create_mutex();
 
 	/****************************** shared counters struct ******************************/
 	// Try to create shared memory object
 	shm_counters = create_shm(SHARED_COUNTERS_NAME, sizeof(countersStruct));
+	if(shm_counters.ptr == NULL)
+		return false;
+
 	counters = (countersStruct*)shm_counters.ptr;
 
 	/****************************** shared settings struct ******************************/
 	// Try to create shared memory object
 	shm_settings = create_shm(SHARED_SETTINGS_NAME, sizeof(ShmSettings));
+	if(shm_settings.ptr == NULL)
+		return false;
+
 	shmSettings = (ShmSettings*)shm_settings.ptr;
 	shmSettings->version = SHARED_MEMORY_VERSION;
 	shmSettings->global_shm_counter = 0;
+	shmSettings->pid = shmem_pid = getpid();
 
 	/****************************** shared strings buffer ******************************/
 	// Try to create shared memory object
-	shm_strings = create_shm(SHARED_STRINGS_NAME, pagesize);
-	counters->strings_MAX = pagesize;
+	shm_strings = create_shm(SHARED_STRINGS_NAME, STRINGS_ALLOC_STEP);
+	if(shm_strings.ptr == NULL)
+		return false;
+
+	counters->strings_MAX = shm_strings.size;
 
 	// Initialize shared string object with an empty string at position zero
 	((char*)shm_strings.ptr)[0] = '\0';
 	shmSettings->next_str_pos = 1;
 
 	/****************************** shared domains struct ******************************/
+	size_t size = get_optimal_object_size(sizeof(domainsData), 1);
 	// Try to create shared memory object
-	shm_domains = create_shm(SHARED_DOMAINS_NAME, pagesize*sizeof(domainsData));
+	shm_domains = create_shm(SHARED_DOMAINS_NAME, size*sizeof(domainsData));
+	if(shm_domains.ptr == NULL)
+		return false;
+
 	domains = (domainsData*)shm_domains.ptr;
-	counters->domains_MAX = pagesize;
+	counters->domains_MAX = size;
 
 	/****************************** shared clients struct ******************************/
-	size_t size = get_optimal_object_size(sizeof(clientsData), 1);
+	size = get_optimal_object_size(sizeof(clientsData), 1);
 	// Try to create shared memory object
 	shm_clients = create_shm(SHARED_CLIENTS_NAME, size*sizeof(clientsData));
+	if(shm_clients.ptr == NULL)
+		return false;
+
 	clients = (clientsData*)shm_clients.ptr;
 	counters->clients_MAX = size;
 
@@ -311,59 +537,92 @@ bool init_shmem(void)
 	size = get_optimal_object_size(sizeof(upstreamsData), 1);
 	// Try to create shared memory object
 	shm_upstreams = create_shm(SHARED_UPSTREAMS_NAME, size*sizeof(upstreamsData));
+	if(shm_upstreams.ptr == NULL)
+		return false;
 	upstreams = (upstreamsData*)shm_upstreams.ptr;
+
 	counters->upstreams_MAX = size;
 
 	/****************************** shared queries struct ******************************/
 	// Try to create shared memory object
 	shm_queries = create_shm(SHARED_QUERIES_NAME, pagesize*sizeof(queriesData));
+	if(shm_queries.ptr == NULL)
+		return false;
 	queries = (queriesData*)shm_queries.ptr;
+
 	counters->queries_MAX = pagesize;
 
 	/****************************** shared overTime struct ******************************/
 	size = get_optimal_object_size(sizeof(overTimeData), OVERTIME_SLOTS);
 	// Try to create shared memory object
 	shm_overTime = create_shm(SHARED_OVERTIME_NAME, size*sizeof(overTimeData));
+	if(shm_overTime.ptr == NULL)
+		return false;
+
+	// set global pointer in overTime.c
 	overTime = (overTimeData*)shm_overTime.ptr;
-	initOverTime();
 
 	/****************************** shared DNS cache struct ******************************/
 	size = get_optimal_object_size(sizeof(DNSCacheData), 1);
 	// Try to create shared memory object
 	shm_dns_cache = create_shm(SHARED_DNS_CACHE, size*sizeof(DNSCacheData));
+	if(shm_dns_cache.ptr == NULL)
+		return false;
+
 	dns_cache = (DNSCacheData*)shm_dns_cache.ptr;
 	counters->dns_cache_MAX = size;
 
 	/****************************** shared per-client regex buffer ******************************/
-	size = get_optimal_object_size(1, 2);
+	size = pagesize; // Allocate one pagesize initially. This may be expanded later on
 	// Try to create shared memory object
 	shm_per_client_regex = create_shm(SHARED_PER_CLIENT_REGEX, size);
+	if(shm_per_client_regex.ptr == NULL)
+		return false;
+
+	counters->per_client_regex_MAX = size;
 
 	return true;
 }
 
-void destroy_shmem(void)
+// CHOWN all shared memory objects to supplied user/group
+void chown_all_shmem(struct passwd *ent_pw)
 {
-	pthread_mutex_destroy(&shmLock->lock);
-	shmLock = NULL;
-
-	delete_shm(&shm_lock);
-	delete_shm(&shm_strings);
-	delete_shm(&shm_counters);
-	delete_shm(&shm_domains);
-	delete_shm(&shm_clients);
-	delete_shm(&shm_queries);
-	delete_shm(&shm_upstreams);
-	delete_shm(&shm_overTime);
-	delete_shm(&shm_settings);
-	delete_shm(&shm_dns_cache);
-	delete_shm(&shm_per_client_regex);
+	for(unsigned int i = 0; i < NUM_SHMEM; i++)
+		chown_shmem(sharedMemories[i], ent_pw);
 }
 
-SharedMemory create_shm(const char *name, const size_t size)
+// Destroy mutex and, subsequently, delete all shared memory objects
+void destroy_shmem(void)
 {
-	if(config.debug & DEBUG_SHMEM)
-		logg("Creating shared memory with name \"%s\" and size %zu", name, size);
+	// First, we destroy the mutex
+	if(shmLock != NULL)
+	{
+		pthread_mutex_destroy(&shmLock->lock.inner);
+		pthread_mutex_destroy(&shmLock->lock.outer);
+	}
+	shmLock = NULL;
+
+	// Then, we delete the shared memory objects
+	for(unsigned int i = 0; i < NUM_SHMEM; i++)
+		delete_shm(sharedMemories[i]);
+}
+
+/// Create shared memory
+///
+/// \param name the name of the shared memory
+/// \param size the size to allocate
+/// \return a structure with a pointer to the mounted shared memory. The pointer
+/// will always be valid, because if it failed FTL will have exited.
+static SharedMemory create_shm(const char *name, const size_t size)
+{
+	char df[64] =  { 0 };
+	const int percentage = get_dev_shm_usage(df);
+	if(config.debug & DEBUG_SHMEM || (config.check.shmem > 0 && percentage > config.check.shmem))
+	{
+		logg("Creating shared memory with name \"%s\" and size %zu (%s)", name, size, df);
+	}
+	if(config.check.shmem > 0 && percentage > config.check.shmem)
+		log_resource_shortage(-1.0, 0, percentage, -1, SHMEM_PATH, df);
 
 	SharedMemory sharedMemory = {
 		.name = name,
@@ -371,37 +630,37 @@ SharedMemory create_shm(const char *name, const size_t size)
 		.ptr = NULL
 	};
 
-	// Try unlinking the shared memory object before creating a new one.
-	// If the object is still existing, e.g., due to a past unclean exit
-	// of FTL, shm_open() would fail with error "File exists"
-	int ret = shm_unlink(name);
-	// Check return code. shm_unlink() returns -1 on error and sets errno
-	// We specifically ignore ENOENT (No such file or directory) as this is not an
-	// error in our use case (we only want the file to be deleted when existing)
-	if(ret != 0 && errno != ENOENT)
-		logg("create_shm(): shm_unlink(\"%s\") failed: %s (%i)", name, strerror(errno), errno);
-
-	// Create the shared memory file in read/write mode with 600 permissions
-	int fd = shm_open(sharedMemory.name, O_CREAT | O_EXCL | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
+	// Create the shared memory file in read/write mode with 600 (u+rw) permissions
+	// and the following open flags:
+	// - O_RDWR: Open the object for read-write access (we need to be able to modify the locks)
+	// - O_CREAT: Create the shared memory object if it does not exist.
+	// - O_EXCL: Return an error if a shared memory object with the given name already exists.
+	errno = 0;
+	const int fd = shm_open(sharedMemory.name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
 
 	// Check for `shm_open` error
 	if(fd == -1)
 	{
-		logg("FATAL: create_shm(): Failed to create_shm shared memory object \"%s\": %s",
+		logg("FATAL: create_shm(): Failed to create shared memory object \"%s\": %s",
 		     name, strerror(errno));
-		exit(EXIT_FAILURE);
+		return sharedMemory;
 	}
 
-	// Resize shared memory file
-	ret = ftruncate(fd, size);
-
-	// Check for `ftruncate` error
-	if(ret == -1)
+	// Allocate shared memory object to specified size
+	// Using f[tl]allocate() will ensure that there's actually space for
+	// this file. Otherwise we end up with a sparse file that can give
+	// SIGBUS if we run out of space while writing to it.
+	const int ret = ftlallocate(fd, 0U, size);
+	if(ret != 0)
 	{
-		logg("FATAL: create_shm(): ftruncate(%i, %zu): Failed to resize shared memory object \"%s\": %s",
-		     fd, size, sharedMemory.name, strerror(errno));
+		logg("FATAL: create_shm(): Failed to resize \"%s\" (%i) to %zu: %s (%i)",
+		     sharedMemory.name, fd, size, strerror(errno), ret);
 		exit(EXIT_FAILURE);
 	}
+
+	// Update how much memory FTL uses
+	// We only add here as this is a new file
+	used_shmem += size;
 
 	// Create shared memory mapping
 	void *shm = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -411,7 +670,7 @@ SharedMemory create_shm(const char *name, const size_t size)
 	{
 		logg("FATAL: create_shm(): Failed to map shared memory object \"%s\" (%i): %s",
 		     sharedMemory.name, fd, strerror(errno));
-		exit(EXIT_FAILURE);
+		return sharedMemory;
 	}
 
 	// Close shared memory object file descriptor as it is no longer
@@ -422,7 +681,7 @@ SharedMemory create_shm(const char *name, const size_t size)
 	return sharedMemory;
 }
 
-void *enlarge_shmem_struct(const char type)
+static void *enlarge_shmem_struct(const char type)
 {
 	SharedMemory *sharedMemory = NULL;
 	size_t sizeofobj, allocation_step;
@@ -445,7 +704,7 @@ void *enlarge_shmem_struct(const char type)
 			break;
 		case DOMAINS:
 			sharedMemory = &shm_domains;
-			allocation_step = pagesize;
+			allocation_step = get_optimal_object_size(sizeof(domainsData), 1);
 			sizeofobj = sizeof(domainsData);
 			counter = &counters->domains_MAX;
 			break;
@@ -461,13 +720,20 @@ void *enlarge_shmem_struct(const char type)
 			sizeofobj = sizeof(DNSCacheData);
 			counter = &counters->dns_cache_MAX;
 			break;
+		case STRINGS:
+			sharedMemory = &shm_strings;
+			allocation_step = STRINGS_ALLOC_STEP;
+			sizeofobj = 1;
+			counter = &counters->strings_MAX;
+			break;
 		default:
 			logg("Invalid argument in enlarge_shmem_struct(%i)", type);
 			return 0;
 	}
 
-	// Reallocate enough space for 4096 instances of requested object
-	realloc_shm(sharedMemory, sharedMemory->size + allocation_step*sizeofobj, true);
+	// Reallocate enough space for requested object
+	const size_t current = sharedMemory->size/sizeofobj;
+	realloc_shm(sharedMemory, current + allocation_step, sizeofobj, true);
 
 	// Add allocated memory to corresponding counter
 	*counter += allocation_step;
@@ -475,16 +741,25 @@ void *enlarge_shmem_struct(const char type)
 	return sharedMemory->ptr;
 }
 
-bool realloc_shm(SharedMemory *sharedMemory, const size_t size, const bool resize)
+static bool realloc_shm(SharedMemory *sharedMemory, const size_t size1, const size_t size2, const bool resize)
 {
-	// Check if we can skip this routine as nothing is to be done
-	// when an object is not to be resized and its size didn't
-	// change elsewhere
-	if(!resize && size == sharedMemory->size)
-		return true;
+	// Absolute target size
+	const size_t size = size1 * size2;
 
 	// Log that we are doing something here
-	logg("%s \"%s\" from %zu to %zu", resize ? "Resizing" : "Remapping", sharedMemory->name, sharedMemory->size, size);
+	char df[64] =  { 0 };
+	const int percentage = get_dev_shm_usage(df);
+
+	// Log output
+	if(resize)
+		logg("Resizing \"%s\" from %zu to (%zu * %zu) == %zu (%s)",
+		     sharedMemory->name, sharedMemory->size, size1, size2, size, df);
+	else
+		logg("Remapping \"%s\" from %zu to (%zu * %zu) == %zu",
+		     sharedMemory->name, sharedMemory->size, size1, size2, size);
+
+	if(config.check.shmem > 0 && percentage > config.check.shmem)
+		log_resource_shortage(-1.0, 0, percentage, -1, SHMEM_PATH, df);
 
 	// Resize shard memory object if requested
 	// If not, we only remap a shared memory object which might have changed
@@ -492,6 +767,9 @@ bool realloc_shm(SharedMemory *sharedMemory, const size_t size, const bool resiz
 	// TCP requests.
 	if(resize)
 	{
+		// Verify shared memory ownership
+		verify_shmem_pid();
+
 		// Open shared memory object
 		const int fd = shm_open(sharedMemory->name, O_RDWR, S_IRUSR | S_IWUSR);
 		if(fd == -1)
@@ -501,16 +779,20 @@ bool realloc_shm(SharedMemory *sharedMemory, const size_t size, const bool resiz
 			exit(EXIT_FAILURE);
 		}
 
-		// Truncate shared memory object to specified size
-		const int result = ftruncate(fd, size);
-		if(result == -1) {
-			logg("FATAL: realloc_shm(): ftruncate(%i, %zu): Failed to resize \"%s\": %s",
-			     fd, size, sharedMemory->name, strerror(errno));
+		// Allocate shared memory object to specified size
+		// Using f[tl]allocate() will ensure that there's actually space for
+		// this file. Otherwise we end up with a sparse file that can give
+		// SIGBUS if we run out of space while writing to it.
+		const int ret = ftlallocate(fd, 0U, size);
+		if(ret != 0)
+		{
+			logg("FATAL: realloc_shm(): Failed to resize \"%s\" (%i) to %zu: %s (%i)",
+			     sharedMemory->name, fd, size, strerror(errno), ret);
 			exit(EXIT_FAILURE);
 		}
 
 		// Close shared memory object file descriptor as it is no longer
-		// needed after having called ftruncate()
+		// needed after having called f[tl]allocate()
 		close(fd);
 
 		// Update shm counters to indicate that at least one shared memory object changed
@@ -527,23 +809,38 @@ bool realloc_shm(SharedMemory *sharedMemory, const size_t size, const bool resiz
 		exit(EXIT_FAILURE);
 	}
 
+	// Update how much memory FTL uses
+	// We add the difference between updated and previous size
+	used_shmem += (size - sharedMemory->size);
+
+	if(config.debug & DEBUG_SHMEM)
+	{
+		if(sharedMemory->ptr == new_ptr)
+			logg("SHMEM pointer not updated: %p (%zu %zu)",
+			     sharedMemory->ptr, sharedMemory->size, size);
+		else
+			logg("SHMEM pointer updated: %p -> %p (%zu %zu)",
+			     sharedMemory->ptr, new_ptr, sharedMemory->size, size);
+	}
+
 	sharedMemory->ptr = new_ptr;
 	sharedMemory->size = size;
 
 	return true;
 }
 
-void delete_shm(SharedMemory *sharedMemory)
+static void delete_shm(SharedMemory *sharedMemory)
 {
-	// Unmap shared memory
-	int ret = munmap(sharedMemory->ptr, sharedMemory->size);
-	if(ret != 0)
-		logg("delete_shm(): munmap(%p, %zu) failed: %s", sharedMemory->ptr, sharedMemory->size, strerror(errno));
+	// Unmap shared memory (if mmapped)
+	if(sharedMemory->ptr != NULL)
+	{
+		if(munmap(sharedMemory->ptr, sharedMemory->size) != 0)
+			logg("delete_shm(): munmap(%p, %zu) failed: %s", sharedMemory->ptr, sharedMemory->size, strerror(errno));
+	}
 
-	// Now you can no longer `shm_open` the memory,
-	// and once all others unlink, it will be destroyed.
-	ret = shm_unlink(sharedMemory->name);
-	if(ret != 0)
+	// Now you can no longer `shm_open` the memory, and once all others
+	// unlink, it will be destroyed.
+	if(shm_unlink(sharedMemory->name) != 0)
 		logg("delete_shm(): shm_unlink(%s) failed: %s", sharedMemory->name, strerror(errno));
 }
 
@@ -565,6 +862,7 @@ static size_t __attribute__((const)) gcd(size_t a, size_t b)
 // in the shared memory object
 static size_t get_optimal_object_size(const size_t objsize, const size_t minsize)
 {
+	// optsize and minsize are in units of objsize
 	const size_t optsize = pagesize / gcd(pagesize, objsize);
 	if(optsize < minsize)
 	{
@@ -608,83 +906,73 @@ static size_t get_optimal_object_size(const size_t objsize, const size_t minsize
 	}
 }
 
-void memory_check(const enum memory_type which)
+// Enlarge shared memory to be able to hold at least one new record
+void shm_ensure_size(void)
 {
-	switch(which)
+	if(counters->queries >= counters->queries_MAX-1)
 	{
-		case QUERIES:
-			if(counters->queries >= counters->queries_MAX-1)
-			{
-				// Have to reallocate shared memory
-				queries = enlarge_shmem_struct(QUERIES);
-				if(queries == NULL)
-				{
-					logg("FATAL: Memory allocation failed! Exiting");
-					exit(EXIT_FAILURE);
-				}
-			}
-			break;
-		case UPSTREAMS:
-			if(counters->upstreams >= counters->upstreams_MAX-1)
-			{
-				// Have to reallocate shared memory
-				upstreams = enlarge_shmem_struct(UPSTREAMS);
-				if(upstreams == NULL)
-				{
-					logg("FATAL: Memory allocation failed! Exiting");
-					exit(EXIT_FAILURE);
-				}
-			}
-			break;
-		case CLIENTS:
-			if(counters->clients >= counters->clients_MAX-1)
-			{
-				// Have to reallocate shared memory
-				clients = enlarge_shmem_struct(CLIENTS);
-				if(clients == NULL)
-				{
-					logg("FATAL: Memory allocation failed! Exiting");
-					exit(EXIT_FAILURE);
-				}
-			}
-			break;
-		case DOMAINS:
-			if(counters->domains >= counters->domains_MAX-1)
-			{
-				// Have to reallocate shared memory
-				domains = enlarge_shmem_struct(DOMAINS);
-				if(domains == NULL)
-				{
-					logg("FATAL: Memory allocation failed! Exiting");
-					exit(EXIT_FAILURE);
-				}
-			}
-			break;
-		case DNS_CACHE:
-			if(counters->dns_cache_size >= counters->dns_cache_MAX-1)
-			{
-				// Have to reallocate shared memory
-				dns_cache = enlarge_shmem_struct(DNS_CACHE);
-				if(dns_cache == NULL)
-				{
-					logg("FATAL: Memory allocation failed! Exiting");
-					exit(EXIT_FAILURE);
-				}
-			}
-			break;
-		case OVERTIME: // fall through
-		default:
-			/* That cannot happen */
-			logg("Fatal error in memory_check(%i)", which);
+		// Have to reallocate shared memory
+		queries = enlarge_shmem_struct(QUERIES);
+		if(queries == NULL)
+		{
+			logg("FATAL: Memory allocation failed! Exiting");
 			exit(EXIT_FAILURE);
-			break;
+		}
+	}
+	if(counters->upstreams >= counters->upstreams_MAX-1)
+	{
+		// Have to reallocate shared memory
+		upstreams = enlarge_shmem_struct(UPSTREAMS);
+		if(upstreams == NULL)
+		{
+			logg("FATAL: Memory allocation failed! Exiting");
+			exit(EXIT_FAILURE);
+		}
+	}
+	if(counters->clients >= counters->clients_MAX-1)
+	{
+		// Have to reallocate shared memory
+		clients = enlarge_shmem_struct(CLIENTS);
+		if(clients == NULL)
+		{
+			logg("FATAL: Memory allocation failed! Exiting");
+			exit(EXIT_FAILURE);
+		}
+	}
+	if(counters->domains >= counters->domains_MAX-1)
+	{
+		// Have to reallocate shared memory
+		domains = enlarge_shmem_struct(DOMAINS);
+		if(domains == NULL)
+		{
+			logg("FATAL: Memory allocation failed! Exiting");
+			exit(EXIT_FAILURE);
+		}
+	}
+	if(counters->dns_cache_size >= counters->dns_cache_MAX-1)
+	{
+		// Have to reallocate shared memory
+		dns_cache = enlarge_shmem_struct(DNS_CACHE);
+		if(dns_cache == NULL)
+		{
+			logg("FATAL: Memory allocation failed! Exiting");
+			exit(EXIT_FAILURE);
+		}
+	}
+	if(shmSettings->next_str_pos + STRINGS_ALLOC_STEP >= shm_strings.size)
+	{
+		// Have to reallocate shared memory
+		if(enlarge_shmem_struct(STRINGS) == NULL)
+		{
+			logg("FATAL: Memory allocation failed! Exiting");
+			exit(EXIT_FAILURE);
+		}
 	}
 }
 
 void reset_per_client_regex(const int clientID)
 {
-	const unsigned int num_regex_tot = counters->num_regex[REGEX_BLACKLIST] +
-	                                   counters->num_regex[REGEX_WHITELIST];
+	const unsigned int num_regex_tot = get_num_regex(REGEX_MAX); // total number
 	for(unsigned int i = 0u; i < num_regex_tot; i++)
 	{
 		// Zero-initialize/reset (= false) all regex (white + black)
@@ -694,26 +982,26 @@ void reset_per_client_regex(const int clientID)
 
 void add_per_client_regex(unsigned int clientID)
 {
-	const unsigned int num_regex_tot = counters->num_regex[REGEX_BLACKLIST] +
-	                                   counters->num_regex[REGEX_WHITELIST];
-	const size_t size = counters->clients * num_regex_tot;
+	const unsigned int num_regex_tot = get_num_regex(REGEX_MAX); // total number
+	const size_t size = get_optimal_object_size(1, counters->clients * num_regex_tot);
 	if(size > shm_per_client_regex.size &&
-	   realloc_shm(&shm_per_client_regex, size, true))
+	   realloc_shm(&shm_per_client_regex, 1, size, true))
 	{
 		reset_per_client_regex(clientID);
+		counters->per_client_regex_MAX = size;
 	}
 }
 
 bool get_per_client_regex(const int clientID, const int regexID)
 {
-	const unsigned int num_regex_tot = counters->num_regex[REGEX_BLACKLIST] +
-	                                   counters->num_regex[REGEX_WHITELIST];
+	const unsigned int num_regex_tot = get_num_regex(REGEX_MAX); // total number
 	const unsigned int id = clientID * num_regex_tot + regexID;
-	const unsigned int maxval = counters->clients * num_regex_tot;
+	const size_t maxval = shm_per_client_regex.size / sizeof(bool);
 	if(id > maxval)
 	{
-		logg("ERROR: get_per_client_regex(%d,%d): Out of bounds (%d > %d * %d == %d)!",
-		     clientID, regexID, id, counters->clients-1, num_regex_tot, maxval);
+		logg("ERROR: get_per_client_regex(%d, %d): Out of bounds (%d > %d * %d, shm_per_client_regex.size = %zd)!",
+		     clientID, regexID,
+		     id, counters->clients, num_regex_tot, maxval);
 		return false;
 	}
 	return ((bool*) shm_per_client_regex.ptr)[id];
@@ -721,86 +1009,152 @@ bool get_per_client_regex(const int clientID, const int regexID)
 
 void set_per_client_regex(const int clientID, const int regexID, const bool value)
 {
-	const unsigned int num_regex_tot = counters->num_regex[REGEX_BLACKLIST] +
-	                                   counters->num_regex[REGEX_WHITELIST];
+	const unsigned int num_regex_tot = get_num_regex(REGEX_MAX); // total number
 	const unsigned int id = clientID * num_regex_tot + regexID;
-	const unsigned int maxval = counters->clients * num_regex_tot;
+	const size_t maxval = shm_per_client_regex.size / sizeof(bool);
 	if(id > maxval)
 	{
-		logg("ERROR: set_per_client_regex(%d,%d,%s): Out of bounds (%d > %d * %d == %d)!",
+		logg("ERROR: set_per_client_regex(%d, %d, %s): Out of bounds (%d > %d * %d, shm_per_client_regex.size = %zd)!",
 		     clientID, regexID, value ? "true" : "false",
-		     id, counters->clients-1, num_regex_tot, maxval);
+		     id, counters->clients, num_regex_tot, maxval);
 		return;
 	}
 	((bool*) shm_per_client_regex.ptr)[id] = value;
 }
 
-static inline bool check_range(int ID, int MAXID, const char* type, int line, const char * function, const char * file)
+static inline bool check_range(int ID, int MAXID, const char* type, const char *func, int line, const char *file)
 {
+	// Check bounds
 	if(ID < 0 || ID > MAXID)
 	{
-		// Check bounds
-		logg("FATAL: Trying to access %s ID %i, but maximum is %i", type, ID, MAXID);
-		logg("       found in %s() (%s:%i)", function, file, line);
+		logg("ERROR: Trying to access %s ID %i, but maximum is %i", type, ID, MAXID);
+		logg("       found in %s() (%s:%i)", func, short_path(file), line);
 		return false;
 	}
+
 	// Everything okay
 	return true;
 }
 
-static inline bool check_magic(int ID, bool checkMagic, unsigned char magic, const char* type, int line, const char * function, const char * file)
+static inline bool check_magic(int ID, bool checkMagic, unsigned char magic, const char *type, const char *func, int line, const char *file)
 {
+	// Check magic only if requested (skipped for new entries which are uninitialized)
 	if(checkMagic && magic != MAGICBYTE)
 	{
-		// Check magic only if requested (skipped for new entries which are uninitialized)
-		logg("FATAL: Trying to access %s ID %i, but magic byte is %x", type, ID, magic);
-		logg("       found in %s() (%s:%i)", function, file, line);
+		logg("ERROR: Trying to access %s ID %i, but magic byte is %x", type, ID, magic);
+		logg("       found in %s() (%s:%i)", func, short_path(file), line);
 		return false;
 	}
+
 	// Everything okay
 	return true;
 }
 
-queriesData* _getQuery(int queryID, bool checkMagic, int line, const char * function, const char * file)
+queriesData* _getQuery(int queryID, bool checkMagic, int line, const char *func, const char *file)
 {
-	if(check_range(queryID, counters->queries_MAX, "query", line, function, file) &&
-	   check_magic(queryID, checkMagic, queries[queryID].magic, "query", line, function, file))
+	// This does not exist, return a NULL pointer
+	if(queryID == -1)
+		return NULL;
+
+	// We are not in a locked situation, return a NULL pointer
+	if(config.debug & DEBUG_LOCKS && !is_our_lock())
+	{
+		logg("ERROR: Tried to obtain query pointer without lock in %s() (%s:%i)!",
+		     func, short_path(file), line);
+		generate_backtrace();
+		return NULL;
+	}
+
+	if(check_range(queryID, counters->queries_MAX, "query", func, line, file) &&
+	   check_magic(queryID, checkMagic, queries[queryID].magic, "query", func, line, file))
 		return &queries[queryID];
 	else
 		return NULL;
 }
 
-clientsData* _getClient(int clientID, bool checkMagic, int line, const char * function, const char * file)
+clientsData* _getClient(int clientID, bool checkMagic, int line, const char *func, const char *file)
 {
-	if(check_range(clientID, counters->clients_MAX, "client", line, function, file) &&
-	   check_magic(clientID, checkMagic, clients[clientID].magic, "client", line, function, file))
+	// This does not exist, we return a NULL pointer
+	if(clientID == -1)
+		return NULL;
+
+	// We are not in a locked situation, return a NULL pointer
+	if(config.debug & DEBUG_LOCKS && !is_our_lock())
+	{
+		logg("ERROR: Tried to obtain client pointer without lock in %s() (%s:%i)!",
+		     func, short_path(file), line);
+		generate_backtrace();
+		return NULL;
+	}
+
+	if(check_range(clientID, counters->clients_MAX, "client", func, line, file) &&
+	   check_magic(clientID, checkMagic, clients[clientID].magic, "client", func, line, file))
 		return &clients[clientID];
 	else
 		return NULL;
 }
 
-domainsData* _getDomain(int domainID, bool checkMagic, int line, const char * function, const char * file)
+domainsData* _getDomain(int domainID, bool checkMagic, int line, const char *func, const char *file)
 {
-	if(check_range(domainID, counters->domains_MAX, "domain", line, function, file) &&
-	   check_magic(domainID, checkMagic, domains[domainID].magic, "domain", line, function, file))
+	// This does not exist, we return a NULL pointer
+	if(domainID == -1)
+		return NULL;
+
+	// We are not in a locked situation, return a NULL pointer
+	if(config.debug & DEBUG_LOCKS && !is_our_lock())
+	{
+		logg("ERROR: Tried to obtain domain pointer without lock in %s() (%s:%i)!",
+		     func, short_path(file), line);
+		generate_backtrace();
+		return NULL;
+	}
+
+	if(check_range(domainID, counters->domains_MAX, "domain", func, line, file) &&
+	   check_magic(domainID, checkMagic, domains[domainID].magic, "domain", func, line, file))
 		return &domains[domainID];
 	else
 		return NULL;
 }
 
-upstreamsData* _getUpstream(int upstreamID, bool checkMagic, int line, const char * function, const char * file)
+upstreamsData* _getUpstream(int upstreamID, bool checkMagic, int line, const char *func, const char *file)
 {
-	if(check_range(upstreamID, counters->upstreams_MAX, "upstream", line, function, file) &&
-	   check_magic(upstreamID, checkMagic, upstreams[upstreamID].magic, "upstream", line, function, file))
+	// This does not exist, we return a NULL pointer
+	if(upstreamID == -1)
+		return NULL;
+
+	// We are not in a locked situation, return a NULL pointer
+	if(config.debug & DEBUG_LOCKS && !is_our_lock())
+	{
+		logg("ERROR: Tried to obtain upstream pointer without lock in %s() (%s:%i)!",
+		     func, short_path(file), line);
+		generate_backtrace();
+		return NULL;
+	}
+
+	if(check_range(upstreamID, counters->upstreams_MAX, "upstream", func, line, file) &&
+	   check_magic(upstreamID, checkMagic, upstreams[upstreamID].magic, "upstream", func, line, file))
 		return &upstreams[upstreamID];
 	else
 		return NULL;
 }
 
-DNSCacheData* _getDNSCache(int cacheID, bool checkMagic, int line, const char * function, const char * file)
+DNSCacheData* _getDNSCache(int cacheID, bool checkMagic, int line, const char *func, const char *file)
 {
-	if(check_range(cacheID, counters->dns_cache_MAX, "dns_cache", line, function, file) &&
-	   check_magic(cacheID, checkMagic, dns_cache[cacheID].magic, "dns_cache", line, function, file))
+	// This does not exist, we return a NULL pointer
+	if(cacheID == -1)
+		return NULL;
+
+	// We are not in a locked situation, return a NULL pointer
+	if(config.debug & DEBUG_LOCKS && !is_our_lock())
+	{
+		logg("ERROR: Tried to obtain cache pointer without lock in %s() (%s:%i)!",
+		     func, short_path(file), line);
+		generate_backtrace();
+		return NULL;
+	}
+
+	if(check_range(cacheID, counters->dns_cache_MAX, "dns_cache", func, line, file) &&
+	   check_magic(cacheID, checkMagic, dns_cache[cacheID].magic, "dns_cache", func, line, file))
 		return &dns_cache[cacheID];
 	else
 		return NULL;

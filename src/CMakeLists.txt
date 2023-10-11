@@ -26,7 +26,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 # SQLITE_OMIT_PROGRESS_CALLBACK: The progress handler callback counter must be checked in the inner loop of the bytecode engine. By omitting this interface, a single conditional is removed from the inner loop of the bytecode engine, helping SQL statements to run slightly faster.
 # SQLITE_DEFAULT_FOREIGN_KEYS=1: This macro determines whether enforcement of foreign key constraints is enabled or disabled by default for new database connections.
 # SQLITE_DQS=0: This setting disables the double-quoted string literal misfeature.
-set(SQLITE_DEFINES "-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_MEMORYDB -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -DSQLITE_DQS=0")
+# SQLITE_ENABLE_DBPAGE_VTAB: Enables the SQLITE_DBPAGE virtual table. Warning: writing to the SQLITE_DBPAGE virtual table can very easily cause unrecoverably database corruption.
+# SQLITE_OMIT_DESERIALIZE: This option causes the the sqlite3_serialize() and sqlite3_deserialize() interfaces to be omitted from the build (was the default before 3.36.0)
+# HAVE_READLINE: Enable readline support to allow easy editing, history and auto-completion
+# SQLITE_DEFAULT_CACHE_SIZE=-16384: Allow up to 16 MiB of cache to be used by SQLite3 (default is 2000 kiB)
+set(SQLITE_DEFINES "-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_DBPAGE_VTAB -DSQLITE_OMIT_DESERIALIZE -DHAVE_READLINE -DSQLITE_DEFAULT_CACHE_SIZE=-16384")
 
 # Code hardening and debugging improvements
 # -fstack-protector-strong: The program will be resistant to having its stack overflowed
@@ -41,7 +45,8 @@ set(SQLITE_DEFINES "-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -D
 # -Wl,-z,defs: Detect and reject underlinking (phenomenon caused by missing shared library arguments when invoking the linked editor to produce another shared library)
 # -Wl,-z,now: Disable lazy binding
 # -Wl,-z,relro: Read-only segments after relocation
-set(HARDENING_FLAGS "-fstack-protector-strong -Wp,-D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now -fexceptions -funwind-tables -fasynchronous-unwind-tables -Wl,-z,defs -Wl,-z,now -Wl,-z,relro")
+# -fno-common: Emit globals without explicit initializer from `.bss` to `.data`. This causes GCC to reject multiple definitions of global variables. This is the new default from GCC-10 on.
+set(HARDENING_FLAGS "-fstack-protector-strong -Wp,-D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now -fexceptions -funwind-tables -fasynchronous-unwind-tables -Wl,-z,defs -Wl,-z,now -Wl,-z,relro -fno-common")
 set(DEBUG_FLAGS "-rdynamic -fno-omit-frame-pointer")
 
 # -Wall: This enables all the warnings about constructions that some users consider questionable, and that are easy to avoid (or modify to prevent the warning), even in conjunction with macros. This also enables some language-specific warnings described in C++ Dialect Options and Objective-C and Objective-C++ Dialect Options.
@@ -76,7 +81,7 @@ if(CMAKE_C_COMPILER_VERSION VERSION_EQUAL 8 OR CMAKE_C_COMPILER_VERSION VERSION_
     # -Wduplicated-branches: Warn when an if-else has identical branches
     # -Wcast-align=strict: Warn whenever a pointer is cast such that the required alignment of the target is increased. For example, warn if a "char *" is cast to an "int *" regardless of the target machine.
     # -Wlogical-not-parentheses: Warn about logical not used on the left hand side operand of a comparison
-    set(EXTRAWARN_GCC8 "-Wduplicated-cond -Wduplicated-branches -Wcast-align=strict -Wlogical-not-parentheses -Wsuggest-attribute=pure -Wsuggest-attribute=const -Wsuggest-attribute=noreturn -Wsuggest-attribute=malloc -Wsuggest-attribute=format -Wsuggest-attribute=cold")
+    set(EXTRAWARN_GCC8 "-Wduplicated-cond -Wduplicated-branches -Wcast-align=strict -Wlogical-not-parentheses -Wsuggest-attribute=pure -Wsuggest-attribute=const -Wsuggest-attribute=malloc -Wsuggest-attribute=format -Wsuggest-attribute=cold")
 else()
     set(EXTRAWARN_GCC8 "")
 endif()
@@ -87,10 +92,9 @@ separate_arguments(EXTRAWARN)
 if(STATIC STREQUAL "true")
     SET(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
     SET(BUILD_SHARED_LIBS OFF)
-else()
-    # -pie -fPIE: (Dynamic) position independent executable
-    set(HARDENING_FLAGS "${HARDENING_FLAGS} -pie -fPIE")
 endif()
+# -pie -fPIE: (Dynamic) position independent executable
+set(HARDENING_FLAGS "${HARDENING_FLAGS} -pie -fPIE")
 
 # -FILE_OFFSET_BITS=64: used by stat(). Avoids problems with files > 2 GB on 32bit machines
 # We define HAVE_POLL_H as this is needed for the musl builds to succeed
@@ -114,7 +118,11 @@ set(sources
         datastructure.h
         dnsmasq_interface.c
         dnsmasq_interface.h
+        edns0.c
+        edns0.h
         enums.h
+        events.c
+        events.h
         files.c
         files.h
         FTL.h
@@ -124,10 +132,10 @@ set(sources
         log.h
         main.c
         main.h
-        memory.c
-        memory.h
         overTime.c
         overTime.h
+        procps.c
+        procps.h
         regex.c
         regex_r.h
         resolve.c
@@ -138,6 +146,8 @@ set(sources
         shmem.h
         signals.c
         signals.h
+        struct_size.c
+        struct_size.h
         timers.c
         timers.h
         vector.c
@@ -152,35 +162,78 @@ add_custom_target(
         COMMAND ${CMAKE_COMMAND} -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -P ${CMAKE_CURRENT_SOURCE_DIR}/gen_version.cmake
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_library(FTL OBJECT ${sources})
+target_compile_options(FTL PRIVATE ${EXTRAWARN})
+target_compile_definitions(FTL PRIVATE DNSMASQ_VERSION=\"${DNSMASQ_VERSION}\")
+target_include_directories(FTL PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_dependencies(FTL gen_version)
+
+
 add_executable(pihole-FTL
-        ${sources}
+        $<TARGET_OBJECTS:FTL>
         $<TARGET_OBJECTS:api>
         $<TARGET_OBJECTS:database>
         $<TARGET_OBJECTS:dnsmasq>
         $<TARGET_OBJECTS:sqlite3>
+        $<TARGET_OBJECTS:lua>
+        $<TARGET_OBJECTS:tre-regex>
+        $<TARGET_OBJECTS:syscalls>
+        $<TARGET_OBJECTS:tools>
         )
 if(STATIC STREQUAL "true")
     set_target_properties(pihole-FTL PROPERTIES LINK_SEARCH_START_STATIC ON)
     set_target_properties(pihole-FTL PROPERTIES LINK_SEARCH_END_STATIC ON)
-    target_link_libraries(pihole-FTL -static-libgcc -static -static-pie)
+    target_link_libraries(pihole-FTL -static-libgcc -static -pie)
+else()
+    find_library(LIBMATH m)
+    target_link_libraries(pihole-FTL ${LIBMATH})
 endif()
-target_compile_options(pihole-FTL PRIVATE ${EXTRAWARN})
-target_include_directories(pihole-FTL PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_dependencies(pihole-FTL gen_version)
-
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 find_package(Threads REQUIRED)
 
-find_library(HOGWEED libhogweed${CMAKE_STATIC_LIBRARY_SUFFIX})
-find_library(GMP libgmp${CMAKE_STATIC_LIBRARY_SUFFIX})
-find_library(NETTLE libnettle${CMAKE_STATIC_LIBRARY_SUFFIX})
-find_library(IDN libidn${CMAKE_STATIC_LIBRARY_SUFFIX})
+# for DNSSEC we need the nettle (+ hogweed) crypto and the gmp math libraries
+find_library(LIBHOGWEED NAMES libhogweed${CMAKE_STATIC_LIBRARY_SUFFIX} hogweed)
+find_library(LIBGMP NAMES libgmp${CMAKE_STATIC_LIBRARY_SUFFIX} gmp)
+find_library(LIBNETTLE NAMES libnettle${CMAKE_STATIC_LIBRARY_SUFFIX} nettle)
+find_library(LIBIDN NAMES libidn${CMAKE_STATIC_LIBRARY_SUFFIX} idn)
 
-# for FTL we need the pthread library
-# for dnsmasq we need the nettle crypto library and the gmp maths library
-# We link the two libraries statically. Although this increases the binary file size by about 1 MB, it saves about 5 MB of shared libraries and makes deployment easier
-target_link_libraries(pihole-FTL rt Threads::Threads ${HOGWEED} ${GMP} ${NETTLE} ${IDN})
+target_link_libraries(pihole-FTL rt Threads::Threads ${LIBHOGWEED} ${LIBGMP} ${LIBNETTLE} ${LIBIDN})
+
+if(LUA_DL STREQUAL "true")
+    find_library(LIBDL dl)
+    target_link_libraries(pihole-FTL ${LIBDL})
+endif()
+
+find_library(LIBREADLINE NAMES libreadline${CMAKE_STATIC_LIBRARY_SUFFIX} readline)
+find_library(LIBHISTORY NAMES libhistory${CMAKE_STATIC_LIBRARY_SUFFIX} history)
+find_library(LIBTERMCAP NAMES libtermcap${CMAKE_STATIC_LIBRARY_SUFFIX} termcap)
+if(LIBREADLINE AND LIBHISTORY AND LIBTERMCAP)
+    message(STATUS "Building FTL with readline support: YES")
+    target_compile_definitions(FTL PRIVATE LUA_USE_READLINE)
+    target_compile_definitions(pihole-FTL PRIVATE LUA_USE_READLINE)
+    target_link_libraries(pihole-FTL ${LIBREADLINE} ${LIBHISTORY} ${LIBTERMCAP})
+else()
+    message(STATUS "Building FTL with readline support: NO")
+endif()
+
+# Do we want to compile an all-in FTL version?
+if(DEFINED ENV{CI_ARCH})
+  if($ENV{CI_ARCH} STREQUAL "x86_64_full")
+    add_definitions(-DDNSMASQ_ALL_OPTS)
+    set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR})
+    find_package(DBus REQUIRED)
+    # Use results of find_package() call.
+    include_directories(${DBUS_INCLUDE_DIRS})
+    target_link_libraries(pihole-FTL ${DBUS_LIBRARIES})
+    find_library(LIBMNL mnl)
+    find_library(LIBNFTNL nftnl)
+    find_library(LIBNFTABLES nftables)
+    find_library(LIBNFNETLINK nfnetlink)
+    find_library(LIBNETFILTER_CONNTRACK netfilter_conntrack)
+    target_link_libraries(pihole-FTL ${LIBMNL} ${LIBNFTABLES} ${LIBNFTNL} ${LIBNFNETLINK} ${LIBNETFILTER_CONNTRACK})
+  endif()
+endif()
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "..." FORCE)
@@ -190,8 +243,13 @@ find_program(SETCAP setcap)
 install(TARGETS pihole-FTL
         RUNTIME DESTINATION bin
         PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-install(CODE "execute_process(COMMAND ${SETCAP} CAP_NET_BIND_SERVICE,CAP_NET_RAW,CAP_NET_ADMIN+eip ${CMAKE_INSTALL_PREFIX}/bin/pihole-FTL)")
+install(CODE "execute_process(COMMAND ${SETCAP} CAP_NET_BIND_SERVICE,CAP_NET_RAW,CAP_NET_ADMIN,CAP_SYS_NICE+eip \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/bin/pihole-FTL)")
 
 add_subdirectory(api)
 add_subdirectory(database)
 add_subdirectory(dnsmasq)
+add_subdirectory(lua)
+add_subdirectory(lua/scripts)
+add_subdirectory(tre-regex)
+add_subdirectory(syscalls)
+add_subdirectory(tools)

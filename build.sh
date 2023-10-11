@@ -12,24 +12,59 @@
 # Abort script if one command returns a non-zero value
 set -e
 
+for var in "$@"
+do
+    case "${var}" in
+        "-c" | "clean"   ) clean=1;;
+        "-C" | "CLEAN"   ) clean=1 && nobuild=1;;
+        "-i" | "install" ) install=1;;
+        "-t" | "test"    ) test=1;;
+    esac
+done
+
 # Prepare build environment
-if [[ "${1}" == "clean" ]]; then
+if [[ -n "${clean}" ]]; then
+    echo "Cleaning build environment"
     rm -rf cmake/
-    exit 0
+    if [[ -n ${nobuild} ]]; then
+        exit 0
+    fi
 fi
 
-# Configure build
+# Remove compiled LUA scripts if older than the plain ones
+for scriptname in src/lua/scripts/*.lua; do
+    if [ -f "${scriptname}.hex" ] && [ "${scriptname}.hex" -ot "${scriptname}" ]; then
+        echo "INFO: ${scriptname} is outdated and will be recompiled"
+        rm "${scriptname}.hex"
+    fi
+done
+
+# Configure build, pass CMake CACHE entries if present
+# Wrap multiple options in "" as first argument to ./build.sh:
+#     ./build.sh "-DA=1 -DB=2" install
 mkdir -p cmake
 cd cmake
-cmake ..
+if [[ "${1}" == "-D"* ]]; then
+    cmake "${1}" ..
+else
+    cmake ..
+fi
 
 # Build the sources
 cmake --build . -- -j $(nproc)
 
 # If we are asked to install, we do this here
 # Otherwise, we simply copy the binary one level up
-if [[ "${1}" == "install" ]]; then
-    sudo make install
+if [[ -n "${install}" ]]; then
+    echo "Installing pihole-FTL"
+    SUDO=$(command -v sudo)
+    ${SUDO} cmake --install .
 else
+    echo "Copying compiled pihole-FTL binary to repository root"
     cp pihole-FTL ../
+fi
+
+if [[ -n "${test}" ]]; then
+    cd ..
+    ./test/run.sh
 fi

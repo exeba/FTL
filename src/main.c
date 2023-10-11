@@ -11,7 +11,6 @@
 #include "FTL.h"
 #include "daemon.h"
 #include "log.h"
-#include "api/socket.h"
 #include "setupVars.h"
 #include "args.h"
 #include "config.h"
@@ -20,10 +19,15 @@
 #include "main.h"
 #include "signals.h"
 #include "regex_r.h"
+// init_shmem()
 #include "shmem.h"
 #include "capabilities.h"
-#include "database/gravity-db.h"
 #include "timers.h"
+#include "procps.h"
+// init_overtime()
+#include "overTime.h"
+// flush_message_table()
+#include "database/message-table.h"
 
 char * username;
 bool needGC = false;
@@ -45,23 +49,25 @@ int main (int argc, char* argv[])
 	parse_args(argc, argv);
 
 	// Try to open FTL log
-	open_FTL_log(true);
+	init_config_mutex();
+	init_FTL_log();
 	timer_start(EXIT_TIMER);
-	logg("########## FTL started! ##########");
+	logg("########## FTL started on %s! ##########", hostname());
 	log_FTL_version(false);
-
-	// Catch SIGSEGV (generate a crash report)
-	// Other signals are handled by dnsmasq
-	// We handle real-time signals later (after dnsmasq has forked)
-	handle_SIGSEGV();
 
 	// Process pihole-FTL.conf
 	read_FTLconf();
+
+	// Catch signals not handled by dnsmasq
+	// We configure real-time signals later (after dnsmasq has forked)
+	handle_signals();
 
 	// Initialize shared memory
 	if(!init_shmem())
 	{
 		logg("Initialization of shared memory failed.");
+		// Check if there is already a running FTL process
+		check_running_FTL();
 		return EXIT_FAILURE;
 	}
 
@@ -70,22 +76,37 @@ int main (int argc, char* argv[])
 	if(strcmp(username, "pihole") != 0)
 		logg("WARNING: Starting pihole-FTL as user %s is not recommended", username);
 
+	// Write PID early on so systemd cannot be fooled during DELAY_STARTUP
+	// times. The PID in this file will later be overwritten after forking
+	savepid();
+
+	// Delay startup (if requested)
+	// Do this before reading the database to make this option not only
+	// useful for interfaces that aren't ready but also for fake-hwclocks
+	// which aren't ready at this point
+	delay_startup();
+
+	// Initialize overTime datastructure
+	initOverTime();
+
 	// Initialize query database (pihole-FTL.db)
 	db_init();
 
+	// Flush messages stored in the long-term database
+	flush_message_table();
+
 	// Try to import queries from long-term database if available
-	if(database && config.DBimport)
+	if(config.DBimport)
 		DB_read_queries();
 
 	log_counter_info();
 	check_setupVarsconf();
 
-	// Check for availability of advanced capabilities
-	// immediately before starting the resolver.
-	check_capabilities();
+	// Check for availability of capabilities in debug mode
+	if(config.debug & DEBUG_CAPS)
+		check_capabilities();
 
-	// Start the resolver, delay startup if requested
-	delay_startup();
+	// Start the resolver
 	startup = false;
 	if(config.debug != 0)
 	{
@@ -95,34 +116,21 @@ int main (int argc, char* argv[])
 	main_dnsmasq(argc_dnsmasq, argv_dnsmasq);
 
 	logg("Shutting down...");
+	// Extra grace time is needed as dnsmasq script-helpers may not be
+	// terminating immediately
+	sleepms(250);
 
-	// Cancel active threads as we don't need them any more
-	if(ipv4telnet) pthread_cancel(telnet_listenthreadv4);
-	if(ipv6telnet) pthread_cancel(telnet_listenthreadv6);
-	pthread_cancel(socket_listenthread);
-
-	// Save new queries to database
-	if(database)
+	// Save new queries to database (if database is used)
+	if(config.DBexport)
 	{
-		DB_save_queries();
-		logg("Finished final database update");
+		lock_shm();
+		int saved;
+		if((saved = DB_save_queries(NULL)) > -1)
+			logg("Finished final database update (stored %d queries)", saved);
+		unlock_shm();
 	}
 
-	// Close sockets and delete Unix socket file handle
-	close_telnet_socket();
-	close_unix_socket(true);
+	cleanup(exit_code);
 
-	// Close gravity database connection
-	gravityDB_close();
-
-	// Remove shared memory objects
-	// Important: This invalidated all objects such as
-	//            counters-> ... Do this last when
-	//            terminating in main.c !
-	destroy_shmem();
-
-	//Remove PID file
-	removepid();
-	logg("########## FTL terminated after %e s! ##########", 1e-3*timer_elapsed_msec(EXIT_TIMER));
 	return exit_code;
 }

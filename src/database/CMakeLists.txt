@@ -13,6 +13,7 @@
 # headers in the build command and thus does not need to be rebuilt when headers
 # are modified.
 set(sqlite3_sources
+        shell.c
         sqlite3.c
         )
 
@@ -35,6 +36,8 @@ set(database_sources
         sqlite3.h
         sqlite3-ext.c
         sqlite3-ext.h
+        aliasclients.c
+        aliasclients.h
         )
 
 add_library(database OBJECT ${database_sources})

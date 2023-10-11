@@ -15,7 +15,9 @@
 #include "datastructure.h"
 
 void initOverTime(void);
-unsigned int getOverTimeID(const time_t timestamp);
+
+#define getOverTimeID(timestamp) _getOverTimeID(timestamp, __FILE__, __LINE__)
+unsigned int _getOverTimeID(const time_t timestamp, const char *file, const int line);
 
 /**
  * Move the overTime slots so the oldest interval starts with mintime. The time
@@ -27,12 +29,11 @@ void moveOverTimeMemory(const time_t mintime);
 
 typedef struct {
 	unsigned char magic;
-	time_t timestamp;
 	int total;
 	int blocked;
 	int cached;
 	int forwarded;
-	int querytypedata[TYPE_MAX-1];
+	time_t timestamp;
 } overTimeData;
 
 extern overTimeData *overTime;

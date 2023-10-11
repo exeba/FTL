@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2020 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2022 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ static struct in_addr server_id(struct dhcp_context *context, struct in_addr ove
 static unsigned int calc_time(struct dhcp_context *context, struct dhcp_config *config, unsigned char *opt);
 static void option_put(struct dhcp_packet *mess, unsigned char *end, int opt, int len, unsigned int val);
 static void option_put_string(struct dhcp_packet *mess, unsigned char *end, 
-			      int opt, char *string, int null_term);
+			      int opt, const char *string, int null_term);
 static struct in_addr option_addr(unsigned char *opt);
 static unsigned int option_uint(unsigned char *opt, int offset, int size);
 static void log_packet(char *type, void *addr, unsigned char *ext_mac, 
@@ -54,17 +54,19 @@ static void do_options(struct dhcp_context *context,
 		       int vendor_class_len,
 		       time_t now,
 		       unsigned int lease_time,
-		       unsigned short fuzz);
+		       unsigned short fuzz,
+		       const char *pxevendor);
 
 
 static void match_vendor_opts(unsigned char *opt, struct dhcp_opt *dopt); 
 static int do_encap_opts(struct dhcp_opt *opt, int encap, int flag, struct dhcp_packet *mess, unsigned char *end, int null_term);
-static void pxe_misc(struct dhcp_packet *mess, unsigned char *end, unsigned char *uuid);
+static void pxe_misc(struct dhcp_packet *mess, unsigned char *end, unsigned char *uuid, const char *pxevendor);
 static int prune_vendor_opts(struct dhcp_netid *netid);
 static struct dhcp_opt *pxe_opts(int pxe_arch, struct dhcp_netid *netid, struct in_addr local, time_t now);
 struct dhcp_boot *find_boot(struct dhcp_netid *netid);
 static int pxe_uefi_workaround(int pxe_arch, struct dhcp_netid *netid, struct dhcp_packet *mess, struct in_addr local, time_t now, int pxe);
 static void apply_delay(u32 xid, time_t recvtime, struct dhcp_netid *netid);
+static int is_pxe_client(struct dhcp_packet *mess, size_t sz, const char **pxe_vendor);
 
 size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 		  size_t sz, time_t now, int unicast_dest, int loopback,
@@ -76,6 +78,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
   struct dhcp_mac *mac;
   struct dhcp_netid_list *id_list;
   int clid_len = 0, ignore = 0, do_classes = 0, rapid_commit = 0, selecting = 0, pxearch = -1;
+  const char *pxevendor = NULL;
   struct dhcp_packet *mess = (struct dhcp_packet *)daemon->dhcp_packet.iov_base;
   unsigned char *end = (unsigned char *)(mess + 1); 
   unsigned char *real_end = (unsigned char *)(mess + 1); 
@@ -369,9 +372,22 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
   
   if (!context)
     {
-      my_syslog(MS_DHCP | LOG_WARNING, _("no address range available for DHCP request %s %s"), 
-		subnet_addr.s_addr ? _("with subnet selector") : _("via"),
-		subnet_addr.s_addr ? inet_ntoa(subnet_addr) : (mess->giaddr.s_addr ? inet_ntoa(mess->giaddr) : iface_name));
+      const char *via;
+      if (subnet_addr.s_addr)
+	{
+	  via = _("with subnet selector");
+	  inet_ntop(AF_INET, &subnet_addr, daemon->addrbuff, ADDRSTRLEN);
+	}
+      else
+	{
+	  via = _("via");
+	  if (mess->giaddr.s_addr)
+	    inet_ntop(AF_INET, &mess->giaddr, daemon->addrbuff, ADDRSTRLEN);
+	  else
+	    safe_strncpy(daemon->addrbuff, iface_name, ADDRSTRLEN);
+	}
+      my_syslog(MS_DHCP | LOG_WARNING, _("no address range available for DHCP request %s %s"),
+		via, daemon->addrbuff);
       return 0;
     }
 
@@ -380,13 +396,19 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
       struct dhcp_context *context_tmp;
       for (context_tmp = context; context_tmp; context_tmp = context_tmp->current)
 	{
-	  strcpy(daemon->namebuff, inet_ntoa(context_tmp->start));
+	  inet_ntop(AF_INET, &context_tmp->start, daemon->namebuff, MAXDNAME);
 	  if (context_tmp->flags & (CONTEXT_STATIC | CONTEXT_PROXY))
-	    my_syslog(MS_DHCP | LOG_INFO, _("%u available DHCP subnet: %s/%s"),
-		      ntohl(mess->xid), daemon->namebuff, inet_ntoa(context_tmp->netmask));
+	    {
+	      inet_ntop(AF_INET, &context_tmp->netmask, daemon->addrbuff, ADDRSTRLEN);
+	      my_syslog(MS_DHCP | LOG_INFO, _("%u available DHCP subnet: %s/%s"),
+			ntohl(mess->xid), daemon->namebuff, daemon->addrbuff);
+	    }
 	  else
-	    my_syslog(MS_DHCP | LOG_INFO, _("%u available DHCP range: %s -- %s"), 
-		      ntohl(mess->xid), daemon->namebuff, inet_ntoa(context_tmp->end));
+	    {
+	      inet_ntop(AF_INET, &context_tmp->end, daemon->addrbuff, ADDRSTRLEN);
+	      my_syslog(MS_DHCP | LOG_INFO, _("%u available DHCP range: %s -- %s"),
+			ntohl(mess->xid), daemon->namebuff, daemon->addrbuff);
+	    }
 	}
     }
   
@@ -647,7 +669,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	      
 	      clear_packet(mess, end);
 	      do_options(context, mess, end, NULL, hostname, get_domain(mess->yiaddr), 
-			 netid, subnet_addr, 0, 0, -1, NULL, vendor_class_len, now, 0xffffffff, 0);
+			 netid, subnet_addr, 0, 0, -1, NULL, vendor_class_len, now, 0xffffffff, 0, NULL);
 	    }
 	}
       
@@ -835,9 +857,8 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
     clid = NULL;
           
   /* Check if client is PXE client. */
-  if (daemon->enable_pxe && 
-      (opt = option_find(mess, sz, OPTION_VENDOR_ID, 9)) && 
-      strncmp(option_ptr(opt, 0), "PXEClient", 9) == 0)
+  if (daemon->enable_pxe &&
+      is_pxe_client(mess, sz, &pxevendor))
     {
       if ((opt = option_find(mess, sz, OPTION_PXE_UUID, 17)))
 	{
@@ -899,7 +920,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	  
 	  option_put(mess, end, OPTION_MESSAGE_TYPE, 1, DHCPACK);
 	  option_put(mess, end, OPTION_SERVER_IDENTIFIER, INADDRSZ, htonl(context->local.s_addr));
-	  pxe_misc(mess, end, uuid);
+	  pxe_misc(mess, end, uuid, pxevendor);
 	  
 	  prune_vendor_opts(tagif_netid);
 	  opt71.val = save71;
@@ -979,7 +1000,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 		  option_put(mess, end, OPTION_MESSAGE_TYPE, 1, 
 			     mess_type == DHCPDISCOVER ? DHCPOFFER : DHCPACK);
 		  option_put(mess, end, OPTION_SERVER_IDENTIFIER, INADDRSZ, htonl(tmp->local.s_addr));
-		  pxe_misc(mess, end, uuid);
+		  pxe_misc(mess, end, uuid, pxevendor);
 		  prune_vendor_opts(tagif_netid);
 		  if ((pxe && !workaround) || !redirect4011)
 		    do_encap_opts(pxe_opts(pxearch, tagif_netid, tmp->local, now), OPTION_VENDOR_CLASS_OPT, DHOPT_VENDOR_MATCH, mess, end, 0);
@@ -1029,8 +1050,9 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	  config->addr.s_addr == option_addr(opt).s_addr)
 	{
 	  prettyprint_time(daemon->dhcp_buff, DECLINE_BACKOFF);
+	  inet_ntop(AF_INET, &config->addr, daemon->addrbuff, ADDRSTRLEN);
 	  my_syslog(MS_DHCP | LOG_WARNING, _("disabling DHCP static address %s for %s"), 
-		    inet_ntoa(config->addr), daemon->dhcp_buff);
+		    daemon->addrbuff, daemon->dhcp_buff);
 	  config->flags |= CONFIG_DECLINED;
 	  config->decline_time = now;
 	}
@@ -1076,7 +1098,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	  
 	  if (have_config(config, CONFIG_ADDR))
 	    {
-	      char *addrs = inet_ntoa(config->addr);
+	      inet_ntop(AF_INET, &config->addr, daemon->addrbuff, ADDRSTRLEN);
 	      
 	      if ((ltmp = lease_find_by_addr(config->addr)) && 
 		  ltmp != lease &&
@@ -1086,7 +1108,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 		  unsigned char *mac = extended_hwaddr(ltmp->hwaddr_type, ltmp->hwaddr_len,
 						       ltmp->hwaddr, ltmp->clid_len, ltmp->clid, &len);
 		  my_syslog(MS_DHCP | LOG_WARNING, _("not using configured address %s because it is leased to %s"),
-			    addrs, print_mac(daemon->namebuff, mac, len));
+			    daemon->addrbuff, print_mac(daemon->namebuff, mac, len));
 		}
 	      else
 		{
@@ -1095,10 +1117,10 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 		    if (context->router.s_addr == config->addr.s_addr)
 		      break;
 		  if (tmp)
-		    my_syslog(MS_DHCP | LOG_WARNING, _("not using configured address %s because it is in use by the server or relay"), addrs);
+		    my_syslog(MS_DHCP | LOG_WARNING, _("not using configured address %s because it is in use by the server or relay"), daemon->addrbuff);
 		  else if (have_config(config, CONFIG_DECLINED) &&
 			   difftime(now, config->decline_time) < (float)DECLINE_BACKOFF)
-		    my_syslog(MS_DHCP | LOG_WARNING, _("not using configured address %s because it was previously declined"), addrs);
+		    my_syslog(MS_DHCP | LOG_WARNING, _("not using configured address %s because it was previously declined"), daemon->addrbuff);
 		  else
 		    conf = config->addr;
 		}
@@ -1131,15 +1153,22 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	  tagif_netid = run_tag_if(&context->netid);
 	}
 
-      log_tags(tagif_netid, ntohl(mess->xid));
       apply_delay(mess->xid, recvtime, tagif_netid);
 
       if (option_bool(OPT_RAPID_COMMIT) && option_find(mess, sz, OPTION_RAPID_COMMIT, 0))
 	{
 	  rapid_commit = 1;
+	  /* If a lease exists for this host and another address, squash it. */
+	  if (lease && lease->addr.s_addr != mess->yiaddr.s_addr)
+	    {
+	      lease_prune(lease, now);
+	      lease = NULL;
+	    }
 	  goto rapid_commit;
 	}
       
+      log_tags(tagif_netid, ntohl(mess->xid));
+
       daemon->metrics[METRIC_DHCPOFFER]++;
       log_packet("DHCPOFFER" , &mess->yiaddr, emac, emac_len, iface_name, NULL, NULL, mess->xid);
       
@@ -1150,7 +1179,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
       option_put(mess, end, OPTION_LEASE_TIME, 4, time);
       /* T1 and T2 are required in DHCPOFFER by HP's wacky Jetdirect client. */
       do_options(context, mess, end, req_options, offer_hostname, get_domain(mess->yiaddr), 
-		 netid, subnet_addr, fqdn_flags, borken_opt, pxearch, uuid, vendor_class_len, now, time, fuzz);
+		 netid, subnet_addr, fqdn_flags, borken_opt, pxearch, uuid, vendor_class_len, now, time, fuzz, pxevendor);
       
       return dhcp_packet_size(mess, agent_id, real_end);
 	
@@ -1301,9 +1330,10 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 		 a lease from one of it's MACs to give the address to another. */
 	      if (config && config_has_mac(config, ltmp->hwaddr, ltmp->hwaddr_len, ltmp->hwaddr_type))
 		{
+		  inet_ntop(AF_INET, &ltmp->addr, daemon->addrbuff, ADDRSTRLEN);
 		  my_syslog(MS_DHCP | LOG_INFO, _("abandoning lease to %s of %s"),
 			    print_mac(daemon->namebuff, ltmp->hwaddr, ltmp->hwaddr_len), 
-			    inet_ntoa(ltmp->addr));
+			    daemon->addrbuff);
 		  lease = ltmp;
 		}
 	      else
@@ -1397,21 +1427,18 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 		  /* DNSMASQ_REQUESTED_OPTIONS */
 		  if ((opt = option_find(mess, sz, OPTION_REQUESTED_OPTIONS, 1)))
 		    {
-		      int len = option_len(opt);
+		      int i, len = option_len(opt);
 		      unsigned char *rop = option_ptr(opt, 0);
-		      char *q = daemon->namebuff;
-		      int i;
+		      
 		      for (i = 0; i < len; i++)
-		        {
-		          q += snprintf(q, MAXDNAME - (q - daemon->namebuff), "%d%s", rop[i], i + 1 == len ? "" : ",");
-		        }
-		      lease_add_extradata(lease, (unsigned char *)daemon->namebuff, (q - daemon->namebuff), 0); 
+			lease_add_extradata(lease, (unsigned char *)daemon->namebuff,
+					    sprintf(daemon->namebuff, "%u", rop[i]), (i + 1) == len ? 0 : ',');
 		    }
 		  else
-		    {
-		      add_extradata_opt(lease, NULL);
-		    }
-
+		    lease_add_extradata(lease, NULL, 0, 0);
+		  
+		  add_extradata_opt(lease, option_find(mess, sz, OPTION_MUD_URL_V4, 1));
+		  
 		  /* space-concat tag set */
 		  if (!tagif_netid)
 		    add_extradata_opt(lease, NULL);
@@ -1499,7 +1526,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	  if (rapid_commit)
 	     option_put(mess, end, OPTION_RAPID_COMMIT, 0, 0);
 	   do_options(context, mess, end, req_options, hostname, get_domain(mess->yiaddr), 
-		     netid, subnet_addr, fqdn_flags, borken_opt, pxearch, uuid, vendor_class_len, now, time, fuzz);
+		     netid, subnet_addr, fqdn_flags, borken_opt, pxearch, uuid, vendor_class_len, now, time, fuzz, pxevendor);
 	}
 
       return dhcp_packet_size(mess, agent_id, real_end); 
@@ -1566,7 +1593,7 @@ size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
 	}
 
       do_options(context, mess, end, req_options, hostname, get_domain(mess->ciaddr),
-		 netid, subnet_addr, fqdn_flags, borken_opt, pxearch, uuid, vendor_class_len, now, 0xffffffff, 0);
+		 netid, subnet_addr, fqdn_flags, borken_opt, pxearch, uuid, vendor_class_len, now, 0xffffffff, 0, pxevendor);
       
       *is_inform = 1; /* handle reply differently */
       return dhcp_packet_size(mess, agent_id, real_end); 
@@ -1651,7 +1678,7 @@ static int sanitise(unsigned char *opt, char *buf)
   for (i = option_len(opt); i > 0; i--)
     {
       char c = *p++;
-      if (isprint((int)c))
+      if (isprint((unsigned char)c))
 	*buf++ = c;
     }
   *buf = 0; /* add terminator */
@@ -1672,42 +1699,40 @@ static void add_extradata_opt(struct dhcp_lease *lease, unsigned char *opt)
 static void log_packet(char *type, void *addr, unsigned char *ext_mac, 
 		       int mac_len, char *interface, char *string, char *err, u32 xid)
 {
-  struct in_addr a;
- 
   if (!err && !option_bool(OPT_LOG_OPTS) && option_bool(OPT_QUIET_DHCP))
     return;
   
-  /* addr may be misaligned */
+  daemon->addrbuff[0] = 0;
   if (addr)
-    memcpy(&a, addr, sizeof(a));
+    inet_ntop(AF_INET, addr, daemon->addrbuff, ADDRSTRLEN);
   
   print_mac(daemon->namebuff, ext_mac, mac_len);
   
-  if(option_bool(OPT_LOG_OPTS))
-     my_syslog(MS_DHCP | LOG_INFO, "%u %s(%s) %s%s%s %s%s",
-	       ntohl(xid), 
-	       type,
-	       interface, 
-	       addr ? inet_ntoa(a) : "",
-	       addr ? " " : "",
-	       daemon->namebuff,
-	       string ? string : "",
-	       err ? err : "");
-  else
-    my_syslog(MS_DHCP | LOG_INFO, "%s(%s) %s%s%s %s%s",
+  if (option_bool(OPT_LOG_OPTS))
+    my_syslog(MS_DHCP | LOG_INFO, "%u %s(%s) %s%s%s %s%s",
+	      ntohl(xid), 
 	      type,
 	      interface, 
-	      addr ? inet_ntoa(a) : "",
+	      daemon->addrbuff,
 	      addr ? " " : "",
 	      daemon->namebuff,
 	      string ? string : "",
 	      err ? err : "");
-
+  else
+    my_syslog(MS_DHCP | LOG_INFO, "%s(%s) %s%s%s %s%s",
+	      type,
+	      interface, 
+	      daemon->addrbuff,
+	      addr ? " " : "",
+	      daemon->namebuff,
+	      string ? string : "",
+	      err ? err : "");
+  
 #ifdef HAVE_UBUS
-	if (!strcmp(type, "DHCPACK"))
-		ubus_event_bcast("dhcp.ack", daemon->namebuff, addr ? inet_ntoa(a) : NULL, string ? string : NULL, interface);
-	else if (!strcmp(type, "DHCPRELEASE"))
-		ubus_event_bcast("dhcp.release", daemon->namebuff, addr ? inet_ntoa(a) : NULL, string ? string : NULL, interface);
+  if (!strcmp(type, "DHCPACK"))
+    ubus_event_bcast("dhcp.ack", daemon->namebuff, addr ? daemon->addrbuff : NULL, string, interface);
+  else if (!strcmp(type, "DHCPRELEASE"))
+    ubus_event_bcast("dhcp.release", daemon->namebuff, addr ? daemon->addrbuff : NULL, string, interface);
 #endif
 }
 
@@ -1859,7 +1884,10 @@ static size_t dhcp_packet_size(struct dhcp_packet *mess, unsigned char *agent_id
   if (option_bool(OPT_LOG_OPTS))
     {
       if (mess->siaddr.s_addr != 0)
-	my_syslog(MS_DHCP | LOG_INFO, _("%u next server: %s"), ntohl(mess->xid), inet_ntoa(mess->siaddr));
+	{
+	  inet_ntop(AF_INET, &mess->siaddr, daemon->addrbuff, ADDRSTRLEN);
+	  my_syslog(MS_DHCP | LOG_INFO, _("%u next server: %s"), ntohl(mess->xid), daemon->addrbuff);
+	}
       
       if ((mess->flags & htons(0x8000)) && mess->ciaddr.s_addr == 0)
 	my_syslog(MS_DHCP | LOG_INFO, _("%u broadcast response"), ntohl(mess->xid));
@@ -1948,7 +1976,7 @@ static void option_put(struct dhcp_packet *mess, unsigned char *end, int opt, in
 }
 
 static void option_put_string(struct dhcp_packet *mess, unsigned char *end, int opt, 
-			      char *string, int null_term)
+			      const char *string, int null_term)
 {
   unsigned char *p;
   size_t len = strlen(string);
@@ -2026,15 +2054,32 @@ static void match_vendor_opts(unsigned char *opt, struct dhcp_opt *dopt)
       dopt->flags &= ~DHOPT_VENDOR_MATCH;
       if (opt && (dopt->flags & DHOPT_VENDOR))
 	{
-	  int i, len = 0;
-	  if (dopt->u.vendor_class)
-	    len = strlen((char *)dopt->u.vendor_class);
-	  for (i = 0; i <= (option_len(opt) - len); i++)
-	    if (len == 0 || memcmp(dopt->u.vendor_class, option_ptr(opt, i), len) == 0)
-	      {
-		dopt->flags |= DHOPT_VENDOR_MATCH;
-		break;
-	      }
+	  const struct dhcp_pxe_vendor *pv;
+	  struct dhcp_pxe_vendor dummy_vendor = {
+	    .data = (char *)dopt->u.vendor_class,
+	    .next = NULL,
+	  };
+	  if (dopt->flags & DHOPT_VENDOR_PXE)
+	    pv = daemon->dhcp_pxe_vendors;
+	  else
+	    pv = &dummy_vendor;
+	  for (; pv; pv = pv->next)
+	    {
+	      int i, len = 0, matched = 0;
+	      if (pv->data)
+	        len = strlen(pv->data);
+	      for (i = 0; i <= (option_len(opt) - len); i++)
+	        if (len == 0 || memcmp(pv->data, option_ptr(opt, i), len) == 0)
+	          {
+		    matched = 1;
+	            break;
+	          }
+	      if (matched)
+		{
+	          dopt->flags |= DHOPT_VENDOR_MATCH;
+		  break;
+		}
+	    }
 	}
     }
 }
@@ -2087,11 +2132,13 @@ static int do_encap_opts(struct dhcp_opt *opt, int encap, int flag,
   return ret;
 }
 
-static void pxe_misc(struct dhcp_packet *mess, unsigned char *end, unsigned char *uuid)
+static void pxe_misc(struct dhcp_packet *mess, unsigned char *end, unsigned char *uuid, const char *pxevendor)
 {
   unsigned char *p;
 
-  option_put_string(mess, end, OPTION_VENDOR_ID, "PXEClient", 0);
+  if (!pxevendor)
+    pxevendor="PXEClient";
+  option_put_string(mess, end, OPTION_VENDOR_ID, pxevendor, 0);
   if (uuid && (p = free_space(mess, end, OPTION_PXE_UUID, 17)))
     memcpy(p, uuid, 17);
 }
@@ -2157,8 +2204,9 @@ static int pxe_uefi_workaround(int pxe_arch, struct dhcp_netid *netid, struct dh
       inet_ntop(AF_INET, &mess->siaddr, (char *)mess->sname, INET_ADDRSTRLEN);
     }
   
-  snprintf((char *)mess->file, sizeof(mess->file), 
-	   strchr(found->basename, '.') ? "%s" : "%s.0", found->basename);
+  if (found->basename)
+    snprintf((char *)mess->file, sizeof(mess->file), 
+	     strchr(found->basename, '.') ? "%s" : "%s.0", found->basename);
   
   return 1;
 }
@@ -2308,6 +2356,29 @@ struct dhcp_boot *find_boot(struct dhcp_netid *netid)
   return boot;
 }
 
+static int is_pxe_client(struct dhcp_packet *mess, size_t sz, const char **pxe_vendor)
+{
+  const unsigned char *opt = NULL;
+  ssize_t conf_len = 0;
+  const struct dhcp_pxe_vendor *conf = daemon->dhcp_pxe_vendors;
+  opt = option_find(mess, sz, OPTION_VENDOR_ID, 0);
+  if (!opt) 
+    return 0;
+  for (; conf; conf = conf->next)
+    {
+      conf_len = strlen(conf->data);
+      if (option_len(opt) < conf_len)
+        continue;
+      if (strncmp(option_ptr(opt, 0), conf->data, conf_len) == 0)
+        {
+          if (pxe_vendor)
+            *pxe_vendor = conf->data;
+          return 1;
+        }
+    }
+  return 0;
+}
+
 static void do_options(struct dhcp_context *context,
 		       struct dhcp_packet *mess,
 		       unsigned char *end, 
@@ -2322,7 +2393,8 @@ static void do_options(struct dhcp_context *context,
 		       int vendor_class_len,
 		       time_t now,
 		       unsigned int lease_time,
-		       unsigned short fuzz)
+		       unsigned short fuzz,
+		       const char *pxevendor)
 {
   struct dhcp_opt *opt, *config_opts = daemon->dhcp_opts;
   struct dhcp_boot *boot;
@@ -2696,7 +2768,7 @@ static void do_options(struct dhcp_context *context,
   
   if (context && pxe_arch != -1)
     {
-      pxe_misc(mess, end, uuid);
+      pxe_misc(mess, end, uuid, pxevendor);
       if (!pxe_uefi_workaround(pxe_arch, tagif, mess, context->local, now, 0))
 	config_opts = pxe_opts(pxe_arch, tagif, context->local, now);
     }
@@ -2740,11 +2812,4 @@ static void apply_delay(u32 xid, time_t recvtime, struct dhcp_netid *netid)
     }
 }
 
-#endif
-  
-
-  
-  
-
-
-  
+#endif /* HAVE_DHCP */

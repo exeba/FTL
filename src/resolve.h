@@ -11,8 +11,9 @@
 #define RESOLVE_H
 
 void *DNSclient_thread(void *val);
-void resolveClients(const bool onlynew);
-void resolveForwardDestinations(const bool onlynew);
+char *resolveHostname(const char *addr);
+bool resolve_names(void) __attribute__((pure));
+bool resolve_this_name(const char *ipaddr) __attribute__((pure));
 
 // musl does not define MAXHOSTNAMELEN
 // If it is not defined, we set the value

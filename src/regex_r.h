@@ -15,8 +15,40 @@
 
 extern const char *regextype[];
 
-int match_regex(const char *input, const int clientID, const unsigned char regexid);
+// Use TRE-Engine instead of GNU/MUSL regex libraries
+#define USE_TRE_REGEX
+
+#ifdef USE_TRE_REGEX
+#include "tre-regex/regex.h"
+#else
+#include <regex.h>
+#endif
+
+#include <netinet/in.h>
+
+typedef struct {
+	bool available :1;
+	struct {
+		bool inverted :1;
+		bool custom_ip4 :1;
+		bool custom_ip6 :1;
+		enum reply_type reply;
+		struct in_addr addr4;
+		struct in6_addr addr6;
+		uint32_t query_type;
+	} ext;
+	int database_id;
+	char *string;
+	regex_t regex;
+} regexData;
+
+unsigned int get_num_regex(const enum regex_type regexid) __attribute__((pure));
+bool in_regex(const char *domain, DNSCacheData *dns_cache, const int clientID, const enum regex_type regexid);
 void allocate_regex_client_enabled(clientsData *client, const int clientID);
+void reload_per_client_regex(clientsData *client);
 void read_regex_from_database(void);
+bool regex_get_redirect(const int regexID, struct in_addr *addr4, struct in6_addr *addr6);
+
+int regex_test(const bool debug_mode, const bool quiet, const char *domainin, const char *regexin);
 
 #endif //REGEX_H

@@ -8,22 +8,25 @@
 *  This file is copyright under the latest version of the EUPL.
 *  Please see LICENSE file for your rights under this license. */
 
-#include "FTL.h"
+#include "../FTL.h"
 #include "api.h"
-#include "shmem.h"
-#include "timers.h"
+#include "../shmem.h"
+#include "../timers.h"
 #include "request.h"
 #include "socket.h"
-#include "resolve.h"
-#include "regex_r.h"
-#include "database/network-table.h"
-#include "log.h"
+#include "../resolve.h"
+#include "../regex_r.h"
+#include "../database/network-table.h"
+#include "../log.h"
+// Eventqueue routines
+#include "../events.h"
+#include "../config.h"
 
 bool __attribute__((pure)) command(const char *client_message, const char* cmd) {
 	return strstr(client_message, cmd) != NULL;
 }
 
-void process_request(const char *client_message, int *sock)
+bool process_request(const char *client_message, const int sock, const bool istelnet)
 {
 	char EOT[2];
 	EOT[0] = 0x04;
@@ -34,118 +37,104 @@ void process_request(const char *client_message, int *sock)
 	{
 		processed = true;
 		lock_shm();
-		getStats(sock);
+		getStats(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">overTime"))
 	{
 		processed = true;
 		lock_shm();
-		getOverTime(sock);
+		getOverTime(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">top-domains") || command(client_message, ">top-ads"))
 	{
 		processed = true;
 		lock_shm();
-		getTopDomains(client_message, sock);
+		getTopDomains(client_message, sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">top-clients"))
 	{
 		processed = true;
 		lock_shm();
-		getTopClients(client_message, sock);
+		getTopClients(client_message, sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">forward-dest"))
 	{
 		processed = true;
 		lock_shm();
-		getUpstreamDestinations(client_message, sock);
+		getUpstreamDestinations(client_message, sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">forward-names"))
 	{
 		processed = true;
 		lock_shm();
-		getUpstreamDestinations(">forward-dest unsorted", sock);
+		getUpstreamDestinations(">forward-dest unsorted", sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">querytypes"))
 	{
 		processed = true;
 		lock_shm();
-		getQueryTypes(sock);
+		getQueryTypes(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">getallqueries"))
 	{
 		processed = true;
 		lock_shm();
-		getAllQueries(client_message, sock);
+		getAllQueries(client_message, sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">recentBlocked"))
 	{
 		processed = true;
 		lock_shm();
-		getRecentBlocked(client_message, sock);
+		getRecentBlocked(client_message, sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">clientID"))
 	{
 		processed = true;
 		lock_shm();
-		getClientID(sock);
-		unlock_shm();
-	}
-	else if(command(client_message, ">QueryTypesoverTime"))
-	{
-		processed = true;
-		lock_shm();
-		getQueryTypesOverTime(sock);
+		getClientID(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">version"))
 	{
 		processed = true;
 		// No lock required
-		getVersion(sock);
+		getVersion(sock, istelnet);
 	}
 	else if(command(client_message, ">dbstats"))
 	{
 		processed = true;
 		// No lock required. Access to the database
 		// is guaranteed to be atomic
-		getDBstats(sock);
+		getDBstats(sock, istelnet);
 	}
 	else if(command(client_message, ">ClientsoverTime"))
 	{
 		processed = true;
 		lock_shm();
-		getClientsOverTime(sock);
+		getClientsOverTime(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">client-names"))
 	{
 		processed = true;
 		lock_shm();
-		getClientNames(sock);
+		getClientNames(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">unknown"))
 	{
 		processed = true;
 		lock_shm();
-		getUnknownQueries(sock);
-		unlock_shm();
-	}
-	else if(command(client_message, ">domain"))
-	{
-		processed = true;
-		lock_shm();
-		getDomainDetails(client_message, sock);
+		getUnknownQueries(sock, istelnet);
 		unlock_shm();
 	}
 	else if(command(client_message, ">cacheinfo"))
@@ -159,12 +148,7 @@ void process_request(const char *client_message, int *sock)
 	{
 		processed = true;
 		logg("Received API request to re-resolve host names");
-		// Important: Don't obtain a lock for this request
-		//            Locking will be done internally when needed
-		// onlynew=false -> reresolve all host names
-		resolveClients(false);
-		resolveForwardDestinations(false);
-		logg("Done re-resolving host names");
+		set_event(RELOAD_PRIVACY_LEVEL);
 	}
 	else if(command(client_message, ">recompile-regex"))
 	{
@@ -176,31 +160,46 @@ void process_request(const char *client_message, int *sock)
 		read_regex_from_database();
 		unlock_shm();
 	}
-	else if(command(client_message, ">update-mac-vendor"))
+	else if(command(client_message, ">delete-lease"))
 	{
 		processed = true;
-		logg("Received API request to update vendors in network table");
-		updateMACVendorRecords();
+		delete_lease(client_message, sock);
+	}
+	else if(command(client_message, ">dns-port"))
+	{
+		processed = true;
+		getDNSport(sock);
+	}
+	else if(command(client_message, ">maxlogage"))
+	{
+		processed = true;
+		getMAXLOGAGE(sock);
+	}
+	else if(command(client_message, ">gateway"))
+	{
+		processed = true;
+		getGateway(sock);
+	}
+	else if(command(client_message, ">interfaces"))
+	{
+		processed = true;
+		getInterfaces(sock);
 	}
 
 	// Test only at the end if we want to quit or kill
 	// so things can be processed before
 	if(command(client_message, ">quit") || command(client_message, EOT))
 	{
-		processed = true;
-		close(*sock);
-		*sock = 0;
+		if(config.debug & DEBUG_API)
+			logg("Received >quit or EOT on socket %d", sock);
+		return true;
 	}
 
 	if(!processed)
-	{
-		ssend(*sock,"unknown command: %s\n",client_message);
-	}
+		ssend(sock, "unknown command: %s\n", client_message);
 
-	// End of queryable commands
-	if(*sock != 0)
-	{
-		// Send EOM
-		seom(*sock);
-	}
+	// End of queryable commands: Send EOM
+	seom(sock, istelnet);
+
+	return false;
 }

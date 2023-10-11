@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2020 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2022 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -38,7 +38,7 @@ void dhcp_common_init(void)
 
 ssize_t recv_dhcp_packet(int fd, struct msghdr *msg)
 {  
-  ssize_t sz;
+  ssize_t sz, new_sz;
  
   while (1)
     {
@@ -65,9 +65,48 @@ ssize_t recv_dhcp_packet(int fd, struct msghdr *msg)
 	}
     }
   
-  while ((sz = recvmsg(fd, msg, 0)) == -1 && errno == EINTR);
+  while ((new_sz = recvmsg(fd, msg, 0)) == -1 && errno == EINTR);
+
+  /* Some kernels seem to ignore MSG_PEEK, and dequeue the packet anyway. 
+     If that happens we get EAGAIN here because the socket is non-blocking.
+     Use the result of the original testing recvmsg as long as the buffer
+     was big enough. There's a small race here that may lose the odd packet,
+     but it's UDP anyway. */
   
-  return (msg->msg_flags & MSG_TRUNC) ? -1 : sz;
+  if (new_sz == -1 && (errno == EWOULDBLOCK || errno == EAGAIN))
+    new_sz = sz;
+  
+  return (msg->msg_flags & MSG_TRUNC) ? -1 : new_sz;
+}
+
+/* like match_netid() except that the check can have a trailing * for wildcard */
+/* started as a direct copy of match_netid() */
+int match_netid_wild(struct dhcp_netid *check, struct dhcp_netid *pool)
+{
+  struct dhcp_netid *tmp1;
+  
+  for (; check; check = check->next)
+    {
+      const int check_len = strlen(check->net);
+      const int is_wc = (check_len > 0 && check->net[check_len - 1] == '*');
+      
+      /* '#' for not is for backwards compat. */
+      if (check->net[0] != '!' && check->net[0] != '#')
+	{
+	  for (tmp1 = pool; tmp1; tmp1 = tmp1->next)
+	    if (is_wc ? (strncmp(check->net, tmp1->net, check_len-1) == 0) :
+		(strcmp(check->net, tmp1->net) == 0))
+	      break;
+	  if (!tmp1)
+	    return 0;
+	}
+      else
+	for (tmp1 = pool; tmp1; tmp1 = tmp1->next)
+	  if (is_wc ? (strncmp((check->net)+1, tmp1->net, check_len-2) == 0) :
+	      (strcmp((check->net)+1, tmp1->net) == 0))
+	    return 0;
+    }
+  return 1;
 }
 
 struct dhcp_netid *run_tag_if(struct dhcp_netid *tags)
@@ -75,8 +114,11 @@ struct dhcp_netid *run_tag_if(struct dhcp_netid *tags)
   struct tag_if *exprs;
   struct dhcp_netid_list *list;
 
+  /* this now uses match_netid_wild() above so that tag_if can
+   * be used to set a 'group of interfaces' tag.
+   */
   for (exprs = daemon->tag_if; exprs; exprs = exprs->next)
-    if (match_netid(exprs->tag, tags, 1))
+    if (match_netid_wild(exprs->tag, tags))
       for (list = exprs->set; list; list = list->next)
 	{
 	  list->list->next = tags;
@@ -271,31 +313,29 @@ static int is_config_in_context(struct dhcp_context *context, struct dhcp_config
 {
   if (!context) /* called via find_config() from lease_update_from_configs() */
     return 1; 
+
+  if (!(config->flags & (CONFIG_ADDR | CONFIG_ADDR6)))
+    return 1;
   
 #ifdef HAVE_DHCP6
   if (context->flags & CONTEXT_V6)
     {
        struct addrlist *addr_list;
 
-       if (!(config->flags & CONFIG_ADDR6))
-	 return 1;
-       
-        for (; context; context = context->current)
-	  for (addr_list = config->addr6; addr_list; addr_list = addr_list->next)
-	    {
-	      if ((addr_list->flags & ADDRLIST_WILDCARD) && context->prefix == 64)
-		return 1;
-	      
-	      if (is_same_net6(&addr_list->addr.addr6, &context->start6, context->prefix))
-		return 1;
-	    }
+       if (config->flags & CONFIG_ADDR6)
+	 for (; context; context = context->current)
+	   for (addr_list = config->addr6; addr_list; addr_list = addr_list->next)
+	     {
+	       if ((addr_list->flags & ADDRLIST_WILDCARD) && context->prefix == 64)
+		 return 1;
+	       
+	       if (is_same_net6(&addr_list->addr.addr6, &context->start6, context->prefix))
+		 return 1;
+	     }
     }
   else
 #endif
     {
-      if (!(config->flags & CONFIG_ADDR))
-	return 1;
-      
       for (; context; context = context->current)
 	if ((config->flags & CONFIG_ADDR) && is_same_net(config->addr, context->start, context->netmask))
 	  return 1;
@@ -526,12 +566,16 @@ char *whichdevice(void)
       }
 
   if (found)
-    return found->name;
-
+    {
+      char *ret = safe_malloc(strlen(found->name)+1);
+      strcpy(ret, found->name);
+      return ret;
+    }
+  
   return NULL;
 }
  
-void  bindtodevice(char *device, int fd)
+static int bindtodevice(char *device, int fd)
 {
   size_t len = strlen(device)+1;
   if (len > IFNAMSIZ)
@@ -539,11 +583,37 @@ void  bindtodevice(char *device, int fd)
   /* only allowed by root. */
   if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, device, len) == -1 &&
       errno != EPERM)
-    die(_("failed to set SO_BINDTODEVICE on DHCP socket: %s"), NULL, EC_BADNET);
+    return 2;
+  
+  return 1;
+}
+
+int bind_dhcp_devices(char *bound_device)
+{
+  int ret = 0;
+
+  if (bound_device)
+    {
+      if (daemon->dhcp)
+	{
+	  if (!daemon->relay4)
+	    ret |= bindtodevice(bound_device, daemon->dhcpfd);
+	  
+	  if (daemon->enable_pxe && daemon->pxefd != -1)
+	    ret |= bindtodevice(bound_device, daemon->pxefd);
+	}
+      
+#if defined(HAVE_DHCP6)
+      if (daemon->doing_dhcp6 && !daemon->relay6)
+	ret |= bindtodevice(bound_device, daemon->dhcp6fd);
+#endif
+    }
+  
+  return ret;
 }
 #endif
 
-static const struct opttab_t {
+const struct opttab_t {
   char *name;
   u16 val, size;
 } opttab[] = {
@@ -613,6 +683,9 @@ static const struct opttab_t {
   { "client-arch", 93, 2 | OT_DEC },
   { "client-interface-id", 94, 0 },
   { "client-machine-id", 97, 0 },
+  { "posix-timezone", 100, OT_NAME }, /* RFC 4833, Sec. 2 */
+  { "tzdb-timezone", 101, OT_NAME }, /* RFC 4833, Sec. 2 */
+  { "ipv6-only", 108, 4 | OT_DEC },  /* RFC 8925 */ 
   { "subnet-select", 118, OT_INTERNAL },
   { "domain-search", 119, OT_RFC1035_NAME },
   { "sip-server", 120, 0 },
@@ -649,6 +722,8 @@ static const struct opttab_t opttab6[] = {
   { "sntp-server", 31,  OT_ADDR_LIST },
   { "information-refresh-time", 32, OT_TIME },
   { "FQDN", 39, OT_INTERNAL | OT_RFC1035_NAME },
+  { "posix-timezone", 41, OT_NAME }, /* RFC 4833, Sec. 3 */
+  { "tzdb-timezone", 42, OT_NAME }, /* RFC 4833, Sec. 3 */
   { "ntp-server", 56, 0 /* OT_ADDR_LIST | OT_RFC1035_NAME */ },
   { "bootfile-url", 59, OT_NAME },
   { "bootfile-param", 60, OT_CSTRING },
@@ -763,7 +838,7 @@ char *option_string(int prot, unsigned int opt, unsigned char *val, int opt_len,
 		for (i = 0, j = 0; i < opt_len && j < buf_len ; i++)
 		  {
 		    char c = val[i];
-		    if (isprint((int)c))
+		    if (isprint((unsigned char)c))
 		      buf[j++] = c;
 		  }
 #ifdef HAVE_DHCP6
@@ -777,7 +852,7 @@ char *option_string(int prot, unsigned int opt, unsigned char *val, int opt_len,
 		    for (k = i + 1; k < opt_len && k < l && j < buf_len ; k++)
 		     {
 		       char c = val[k];
-		       if (isprint((int)c))
+		       if (isprint((unsigned char)c))
 			 buf[j++] = c;
 		     }
 		    i = l;
@@ -798,7 +873,7 @@ char *option_string(int prot, unsigned int opt, unsigned char *val, int opt_len,
 		    for (k = 0; k < len && j < buf_len; k++)
 		      {
 		       char c = *p++;
-		       if (isprint((int)c))
+		       if (isprint((unsigned char)c))
 			 buf[j++] = c;
 		     }
 		    i += len +2;
@@ -943,11 +1018,34 @@ void log_context(int family, struct dhcp_context *context)
 
 void log_relay(int family, struct dhcp_relay *relay)
 {
+  int broadcast = relay->server.addr4.s_addr == 0;
   inet_ntop(family, &relay->local, daemon->addrbuff, ADDRSTRLEN);
-  inet_ntop(family, &relay->server, daemon->namebuff, ADDRSTRLEN); 
+  inet_ntop(family, &relay->server, daemon->namebuff, ADDRSTRLEN);
 
+  if (family == AF_INET && relay->port != DHCP_SERVER_PORT)
+    sprintf(daemon->namebuff + strlen(daemon->namebuff), "#%u", relay->port);
+
+#ifdef HAVE_DHCP6
+  struct in6_addr multicast;
+
+  inet_pton(AF_INET6, ALL_SERVERS, &multicast);
+
+  if (family == AF_INET6)
+    {
+      broadcast = IN6_ARE_ADDR_EQUAL(&relay->server.addr6, &multicast);
+      if (relay->port != DHCPV6_SERVER_PORT)
+	sprintf(daemon->namebuff + strlen(daemon->namebuff), "#%u", relay->port);
+    }
+#endif
+  
+  
   if (relay->interface)
-    my_syslog(MS_DHCP | LOG_INFO, _("DHCP relay from %s to %s via %s"), daemon->addrbuff, daemon->namebuff, relay->interface);
+    {
+      if (broadcast)
+	my_syslog(MS_DHCP | LOG_INFO, _("DHCP relay from %s via %s"), daemon->addrbuff, relay->interface);
+      else
+	my_syslog(MS_DHCP | LOG_INFO, _("DHCP relay from %s to %s via %s"), daemon->addrbuff, daemon->namebuff, relay->interface);
+    }
   else
     my_syslog(MS_DHCP | LOG_INFO, _("DHCP relay from %s to %s"), daemon->addrbuff, daemon->namebuff);
 }

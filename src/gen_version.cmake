@@ -24,7 +24,7 @@ if(DEFINED ENV{GIT_HASH})
     set(GIT_HASH "$ENV{GIT_HASH}")
 else()
     execute_process(
-            COMMAND           git --no-pager describe --always --dirty
+            COMMAND           git --no-pager describe --always --abbrev=8 --dirty
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             OUTPUT_VARIABLE   GIT_HASH
             ERROR_QUIET
@@ -36,7 +36,7 @@ if(DEFINED ENV{GIT_VERSION})
     set(GIT_VERSION "$ENV{GIT_VERSION}")
 else()
     execute_process(
-            COMMAND           git --no-pager describe --tags --always --dirty
+            COMMAND           git --no-pager describe --tags --always --abbrev=8 --dirty
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             OUTPUT_VARIABLE   GIT_VERSION
             ERROR_QUIET
@@ -68,9 +68,9 @@ else()
     )
 endif()
 
-# If CIRCLE_JOB is unset (local compilation), ask uname -m and add locally compiled comment
-if(DEFINED ENV{CIRCLE_JOB})
-    set(FTL_ARCH "$ENV{CIRCLE_JOB} (compiled on CI)")
+# If CI_ARCH is unset (local compilation), ask uname -m and add locally compiled comment
+if(DEFINED ENV{CI_ARCH})
+    set(FTL_ARCH "$ENV{CI_ARCH} (compiled on CI)")
 else()
     execute_process(
             COMMAND           uname -m

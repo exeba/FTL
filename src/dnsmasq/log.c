@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2020 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2022 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -15,6 +15,7 @@
 */
 
 #include "dnsmasq.h"
+#include "../log.h"
 
 #ifdef __ANDROID__
 #  include <android/log.h>
@@ -100,10 +101,23 @@ int log_start(struct passwd *ent_pw, int errfd)
   /* If we're running as root and going to change uid later,
      change the ownership here so that the file is always owned by
      the dnsmasq user. Then logrotate can just copy the owner.
-     Failure of the chown call is OK, (for instance when started as non-root) */
-  if (log_to_file && !log_stderr && ent_pw && ent_pw->pw_uid != 0 && 
-      fchown(log_fd, ent_pw->pw_uid, -1) != 0)
-    ret = errno;
+     Failure of the chown call is OK, (for instance when started as non-root).
+     
+     If we've created a file with group-id root, we also make
+     the file group-writable. This gives processes in the root group
+     write access to the file and avoids the problem that on some systems,
+     once the file is owned by the dnsmasq user, it can't be written
+     whilst dnsmasq is running as root during startup.
+ */
+  if (log_to_file && !log_stderr && ent_pw && ent_pw->pw_uid != 0)
+    {
+      struct stat ls;
+      if (getgid() == 0 && fstat(log_fd, &ls) == 0 && ls.st_gid == 0 &&
+	  (ls.st_mode & S_IWGRP) == 0)
+	(void)fchmod(log_fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP);
+      if (fchown(log_fd, ent_pw->pw_uid, -1) != 0)
+	ret = errno;
+    }
 
   return ret;
 }
@@ -118,7 +132,7 @@ int log_reopen(char *log_file)
       /* NOTE: umask is set to 022 by the time this gets called */
       
       if (log_file)
-	log_fd = open(log_file, O_WRONLY|O_CREAT|O_APPEND, S_IRUSR|S_IWUSR|S_IRGRP);      
+	log_fd = open(log_file, O_WRONLY|O_CREAT|O_APPEND, S_IRUSR|S_IWUSR|S_IRGRP);
       else
 	{
 #if defined(HAVE_SOLARIS_NETWORK) || defined(__ANDROID__)
@@ -273,7 +287,7 @@ static void log_write(void)
 /* priority is one of LOG_DEBUG, LOG_INFO, LOG_NOTICE, etc. See sys/syslog.h.
    OR'd to priority can be MS_TFTP, MS_DHCP, ... to be able to do log separation between
    DNS, DHCP and TFTP services.
-*/
+   If OR'd with MS_DEBUG, the messages are suppressed unless --log-debug is set. */
 void my_syslog(int priority, const char *format, ...)
 {
   va_list ap;
@@ -290,7 +304,13 @@ void my_syslog(int priority, const char *format, ...)
     func = "-dhcp";
   else if ((LOG_FACMASK & priority) == MS_SCRIPT)
     func = "-script";
-	    
+  else if ((LOG_FACMASK & priority) == MS_DEBUG)
+    {
+      if (!option_bool(OPT_LOG_DEBUG))
+	return;
+      func = "-debug";
+    }
+  
 #ifdef LOG_PRI
   priority = LOG_PRI(priority);
 #else
@@ -305,6 +325,19 @@ void my_syslog(int priority, const char *format, ...)
       vfprintf(stderr, format, ap);
       va_end(ap);
       fputc('\n', stderr);
+    }
+
+  /* Pi-hole diagnosis system */
+  if(priority == LOG_WARNING)
+    {
+      char *message;
+      va_start(ap, format);
+      if(vasprintf(&message, format, ap))
+        {
+          dnsmasq_diagnosis_warning(message);
+          free(message);
+        }
+      va_end(ap);
     }
 
   if (log_fd == -1)
@@ -470,6 +503,10 @@ void die(char *message, char *arg1, int exit_code)
   echo_stderr = 0;
   my_syslog(LOG_CRIT, _("FAILED to start up"));
   flush_log();
+
+  /********** Pi-hole modification *************/
+  FTL_log_dnsmasq_fatal(message, arg1, errmess);
+  /*********************************************/
   
   exit(exit_code);
 }

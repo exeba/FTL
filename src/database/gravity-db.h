@@ -10,30 +10,33 @@
 #ifndef GRAVITY_H
 #define GRAVITY_H
 
-// global variable counters
-#include "memory.h"
-// clients data structure
-#include "datastructure.h"
+// clientsData
+#include "../datastructure.h"
+// regexData
+#include "../regex_r.h"
 
 // Table indices
 enum gravity_tables { GRAVITY_TABLE, EXACT_BLACKLIST_TABLE, EXACT_WHITELIST_TABLE, REGEX_BLACKLIST_TABLE, REGEX_WHITELIST_TABLE, UNKNOWN_TABLE } __attribute__ ((packed));
 
-void gravityDB_forked(void);
 bool gravityDB_open(void);
-bool gravityDB_prepare_client_statements(const int clientID, clientsData* client);
+bool gravityDB_reopen(void);
+void gravityDB_forked(void);
+void gravityDB_reload_groups(clientsData* client);
+bool gravityDB_prepare_client_statements(clientsData* client);
 void gravityDB_close(void);
 bool gravityDB_getTable(unsigned char list);
 const char* gravityDB_getDomain(int *rowid);
-char* get_group_names(const char *group_ids) __attribute__ ((malloc));
+char* get_client_names_from_ids(const char *group_ids) __attribute__ ((malloc));
 void gravityDB_finalizeTable(void);
 int gravityDB_count(const enum gravity_tables list);
+void check_inaccessible_adlists(void);
+
+enum db_result in_gravity(const char *domain, clientsData *client);
+enum db_result in_blacklist(const char *domain, DNSCacheData *dns_cache, clientsData *client);
+enum db_result in_whitelist(const char *domain, DNSCacheData *dns_cache, clientsData *client);
 bool in_auditlist(const char *domain);
 
-bool in_gravity(const char *domain, const int clientID, clientsData* client);
-bool in_whitelist(const char *domain, const int clientID, clientsData* client);
-bool in_blacklist(const char *domain, const int clientID, clientsData* client);
-
-bool gravityDB_get_regex_client_groups(clientsData* client, const int numregex, const int *regexid,
-                                       const unsigned char type, const char* table, const int clientID);
+bool gravityDB_get_regex_client_groups(clientsData* client, const unsigned int numregex, const regexData *regex,
+                                       const unsigned char type, const char* table);
 
 #endif //GRAVITY_H
